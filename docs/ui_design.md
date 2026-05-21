@@ -7,7 +7,7 @@
 - 参考方向：
   - ElevenLabs：学习其创作体验、声音资产中心、试听 Demo、场景化表达和商业信任建设。
   - MiniMax：学习其模型矩阵、开发者入口、API 平台、版本体系和能力服务化表达。
-- 首期功能范围：TTS HTTP API、WebSocket 流式 TTS、VoxLite/VoxPrime 模型、声音库、声音克隆、音色设计、Playground、API Key、用量统计、团队权限。
+- 首期功能范围：TTS HTTP API、WebSocket 流式 TTS、Auralith One / Auralith Ultra 模型、声音库、声音克隆、音色设计、Playground、API Key、用量统计、团队权限。
 - 非首期范围：完整音频编辑器、Speech to Text、Dubbing、人声分离、公开声音 Marketplace。
 
 ## 2. UI 设计原则
@@ -106,7 +106,7 @@
 - Audio chunk：用于 WebSocket Streaming Demo，表达低延迟流式返回。
 - Token-to-audio pipeline：用于官网解释文本到语音的生成过程。
 - 代码片段：用于 API 能力展示。
-- 模型指标：用于 VoxLite / VoxPrime 的技术可信度。
+- 模型指标：用于 Auralith One / Auralith Ultra 的技术可信度。
 
 避免使用：
 
@@ -182,7 +182,7 @@
 高科技感应通过“可操作的能力证据”体现，而不是靠装饰：
 
 - Hero 里直接展示可交互 TTS Demo。
-- Models 页面展示 `vox-lite-v1`、`vox-prime-v1`、版本状态和延迟指标。
+- Models 页面展示 `auralith-one-1.0`、`auralith-ultra-1.0`、版本状态和延迟指标。
 - Streaming Demo 展示首包延迟、chunk 数、会话状态。
 - Voice Clone 展示样本质量检测 checklist 和声纹波形。
 - Voice Design 展示 prompt 到多个候选声音的生成过程。
@@ -194,8 +194,8 @@
 
 | 页面 | 目标 | 核心内容 |
 | --- | --- | --- |
-| Home | 建立价值认知并引导试用 | Hero、TTS Demo、VoxLite/VoxPrime、声音库、API、客户场景 |
-| Models | 解释模型体系 | VoxLite、VoxPrime、版本、能力、延迟、价格定位 |
+| Home | 建立价值认知并引导试用 | Hero、TTS Demo、Auralith One / Auralith Ultra、声音库、API、客户场景 |
+| Models | 解释模型体系 | Auralith One、Auralith Ultra、版本、能力、延迟、价格定位 |
 | Voices | 展示声音能力 | 系统声音、克隆声音、音色设计、筛选试听 |
 | Developers | 引导 API 集成 | 快速开始、HTTP TTS、WebSocket、SDK、错误码 |
 | Pricing | 展示商业化 | 免费额度、模型价格、并发、团队能力 |
@@ -207,7 +207,7 @@
 | --- | --- | --- |
 | Home | Overview | 快速开始、最近生成、用量、推荐声音 |
 | Playground | TTS、Streaming Demo | 网页端试音、调参、复制 API |
-| Models | VoxLite、VoxPrime | 查看模型能力、版本、限制 |
+| Models | Auralith One、Auralith Ultra | 查看模型能力、版本、限制 |
 | Voices | Library、Clone、Design | 搜索声音、创建声音、管理声音 |
 | API | Keys、Docs、Logs、Errors | 创建密钥、看文档、排查请求 |
 | Usage & Billing | Usage、Plans、Invoices | 查看消耗、升级套餐、账单 |
@@ -233,10 +233,10 @@ Hero Demo 组件：
 
 - 文本输入框。
 - 声音选择下拉。
-- 模型切换：VoxLite / VoxPrime segmented control。
+- 模型切换：Auralith One / Auralith Ultra segmented control。
 - 生成按钮。
 - 播放条和下载按钮。
-- 小字展示：`model: vox-prime-v1`、`voice_id: ...`、`format: mp3`。
+- 小字展示：`model: auralith-ultra-1.0`、`voice_id: ...`、`format: mp3`。
 
 ### 5.2 能力模块
 
@@ -262,8 +262,8 @@ Hero Demo 组件：
 
 | 模型 | 定位 | UI 展示 |
 | --- | --- | --- |
-| VoxLite | 低延迟、低成本、高并发 | 速度、价格、适合客服/批量 |
-| VoxPrime | 高自然度、高表现力、多语言精品 | 表现力、情绪、适合内容创作 |
+| Auralith One | 低延迟、低成本、高并发 | 速度、价格、适合客服/批量 |
+| Auralith Ultra | 高自然度、高表现力、多语言精品 | 表现力、情绪、适合内容创作 |
 
 组件：
 
@@ -352,7 +352,7 @@ Hero Demo 组件：
 - 文本输入。
 - 语言选择。
 - 声音选择。
-- 模型选择：VoxLite / VoxPrime。
+- 模型选择：Auralith One / Auralith Ultra。
 - 最近使用声音。
 
 中栏：参数与生成
@@ -402,7 +402,7 @@ Hero Demo 组件：
 
 ### 8.1 页面目标
 
-解释 VoxLite 与 VoxPrime 的差异，并帮助用户选择合适模型。
+解释 Auralith One 与 Auralith Ultra 的差异，并帮助用户选择合适模型。
 
 ### 8.2 页面结构
 
@@ -418,8 +418,8 @@ Hero Demo 组件：
 
 | 字段 | 说明 |
 | --- | --- |
-| 模型名称 | VoxLite / VoxPrime |
-| API ID | `vox-lite-v1` / `vox-prime-v1` |
+| 模型名称 | Auralith One / Auralith Ultra |
+| API ID | `auralith-one-1.0` / `auralith-ultra-1.0` |
 | 定位 | 低延迟或高表现力 |
 | 推荐场景 | 客服、批量、内容创作等 |
 | 支持能力 | 多语言、克隆声音、音色设计 |
@@ -581,7 +581,7 @@ Hero Demo 组件：
 - 成功率。
 - 平均延迟。
 - WebSocket 会话数。
-- VoxLite / VoxPrime 调用占比。
+- Auralith One / Auralith Ultra 调用占比。
 - 克隆和音色设计次数。
 
 图表：
@@ -679,8 +679,8 @@ Hero Demo 组件：
 
 使用 segmented control：
 
-- VoxLite。
-- VoxPrime。
+- Auralith One。
+- Auralith Ultra。
 
 展开详情时展示：
 
@@ -763,7 +763,7 @@ Hero Demo 组件：
 - 开发者能在 10 分钟内创建 API Key 并完成一次 TTS 调用。
 - Playground 中参数变化能同步生成等价 API 请求。
 - 每个声音卡片都能试听，并能复制 voice_id。
-- VoxLite 与 VoxPrime 的差异能在 Models 页面一屏内看懂。
+- Auralith One 与 Auralith Ultra 的差异能在 Models 页面一屏内看懂。
 - Voice Clone 必须包含质量检测和授权确认。
 - Voice Design 候选声音必须能试听、保存并进入声音库。
 - API Logs 中任意失败请求都能定位 request_id 和 error_code。
@@ -773,5 +773,5 @@ Hero Demo 组件：
 
 - 不做完整 Studio：首期聚焦 TTS 服务化和声音资产管理，避免产品边界过宽。
 - 不做公开 Marketplace：先解决私有声音、团队权限和合规，再考虑分发体系。
-- 不把模型参数规模暴露给用户：使用 VoxLite / VoxPrime 表达体验和场景。
+- 不把模型参数规模暴露给用户：使用 Auralith One / Auralith Ultra 表达体验和场景。
 - 不让官网首页承载全部功能：官网负责转化，控制台负责效率，文档负责开发者细节。

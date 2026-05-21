@@ -1,5 +1,6 @@
 node_modules/
 dist/
+data/admin-state.json
 .env.local
 .env*.local
 *.log

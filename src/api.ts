@@ -1,4 +1,4 @@
-import type { ModelId, Voice } from "./types";
+import type { AdminState, ModelId, Voice } from "./types";
 
 export interface LiveTtsResponse {
   requestId: string;
@@ -58,6 +58,14 @@ export async function deleteVoice(voiceId: string) {
   });
 }
 
+export async function updateVoiceSource(voiceId: string, source: "cloned" | "designed") {
+  return apiFetch<{ voice: Voice | null }>(`/api/mosi/voices/${encodeURIComponent(voiceId)}/source`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ source })
+  });
+}
+
 export async function synthesizeSpeech(payload: {
   text: string;
   voiceId: string;
@@ -103,4 +111,50 @@ export async function saveDesignedVoice(name: string, audioBase64: string) {
 
 export function toDataUrl(base64: string, mimeType = "audio/wav") {
   return `data:${mimeType};base64,${base64}`;
+}
+
+export async function fetchAdminState() {
+  return apiFetch<AdminState>("/api/admin/state");
+}
+
+export async function saveAdminState(payload: AdminState) {
+  const result = await apiFetch<{ ok: true; updatedAt: string }>("/api/admin/state", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload)
+  });
+
+  return {
+    ok: true as const,
+    updatedAt: result.updatedAt,
+    teamMembers: payload.teamMembers,
+    apiKeys: payload.apiKeys,
+    pricingPlans: payload.pricingPlans,
+    pricingDrafts: payload.pricingDrafts,
+    usagePolicy: payload.usagePolicy,
+    auditEvents: payload.auditEvents,
+    voiceGovernance: payload.voiceGovernance
+  };
+}
+
+export async function publishPricingDrafts() {
+  return apiFetch<{ pricingPlans: AdminState["pricingPlans"]; pricingDrafts: AdminState["pricingDrafts"] }>("/api/admin/pricing/publish", {
+    method: "POST"
+  });
+}
+
+export async function fetchPublicPricingPlans() {
+  return apiFetch<{ plans: AdminState["pricingPlans"] }>("/api/public/pricing");
+}
+
+export async function loginSession(role: "Admin" | "Developer" | "Creator") {
+  return apiFetch<{ ok: true; role: string }>("/api/session/login", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ role })
+  });
+}
+
+export async function logoutSession() {
+  return apiFetch<{ ok: true }>("/api/session/logout", { method: "POST" });
 }

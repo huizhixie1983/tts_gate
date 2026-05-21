@@ -16,120 +16,120 @@ export const CURATED_VOICE_IDS = [
 export const curatedPublicVoices: Voice[] = [
   {
     id: "2020008594694475776",
-    name: "北京男声（清朗男生）",
+    name: "Beijing Male Voice",
     language: "Chinese",
     gender: "Male",
-    style: "清晰自然",
+    style: "Clear and natural",
     scenario: "Public Voice",
     source: "system",
-    availableModels: ["vox-lite-v1", "vox-prime-v1"],
+    availableModels: ["auralith-one-1.0", "auralith-ultra-1.0"],
     favorite: false,
     status: "PUBLIC",
-    previewText: "普通话标准，带轻微北京口音，发音清晰自然，语气松弛有亲和力。"
+    previewText: "Standard Mandarin with a light Beijing accent, clear diction, and a relaxed, approachable tone."
   },
   {
     id: "2020009311371005952",
-    name: "台湾女声（温柔女生）",
+    name: "Taiwan Female Voice",
     language: "Chinese",
     gender: "Female",
-    style: "温柔治愈",
+    style: "Soft and soothing",
     scenario: "Public Voice",
     source: "system",
-    availableModels: ["vox-lite-v1", "vox-prime-v1"],
+    availableModels: ["auralith-one-1.0", "auralith-ultra-1.0"],
     favorite: false,
     status: "PUBLIC",
-    previewText: "台湾口音柔和细腻，语气温柔平稳，情绪收敛但有温度。"
+    previewText: "A soft Taiwanese accent with steady pacing, low emotional intensity, and a warm finish."
   },
   {
     id: "2001257729754140672",
-    name: "阿树",
+    name: "Ashu",
     language: "Chinese",
     gender: "Unknown",
-    style: "松弛耐听",
+    style: "Relaxed and textured",
     scenario: "Public Voice",
     source: "system",
-    availableModels: ["vox-lite-v1", "vox-prime-v1"],
+    availableModels: ["auralith-one-1.0", "auralith-ultra-1.0"],
     favorite: false,
     status: "PUBLIC",
-    previewText: "冬天清晨的灰白天空，风很冷，但阳光迟早会出来。"
+    previewText: "A low-pressure, reflective tone with calm pacing and a slightly cinematic texture."
   },
   {
     id: "2001286865130360832",
-    name: "周周",
+    name: "Zhouzhou",
     language: "Chinese",
     gender: "Unknown",
-    style: "独白讲述",
+    style: "Reflective monologue",
     scenario: "Public Voice",
     source: "system",
-    availableModels: ["vox-lite-v1", "vox-prime-v1"],
+    availableModels: ["auralith-one-1.0", "auralith-ultra-1.0"],
     favorite: false,
     status: "PUBLIC",
-    previewText: "薄雾里的风、旧磁带、夜里低声自言自语。"
+    previewText: "Quiet, intimate, and slightly analog in feel, like a close-range spoken monologue."
   },
   {
     id: "2001898421836845056",
-    name: "子琪",
+    name: "Ziqi",
     language: "Chinese",
     gender: "Female",
-    style: "轻快元气",
+    style: "Bright and energetic",
     scenario: "Public Voice",
     source: "system",
-    availableModels: ["vox-lite-v1", "vox-prime-v1"],
+    availableModels: ["auralith-one-1.0", "auralith-ultra-1.0"],
     favorite: false,
     status: "PUBLIC",
-    previewText: "雨后未干的水泥地，空气里有点凉，音量不大，却带着倔强的边角。"
+    previewText: "Light, crisp, and energetic, with a youthful edge and a compact delivery style."
   },
   {
     id: "2001910895478837248",
-    name: "小满",
+    name: "Xiaoman",
     language: "Chinese",
     gender: "Female",
-    style: "轻快明亮",
+    style: "Light and vivid",
     scenario: "Public Voice",
     source: "system",
-    availableModels: ["vox-lite-v1", "vox-prime-v1"],
+    availableModels: ["auralith-one-1.0", "auralith-ultra-1.0"],
     favorite: false,
     status: "PUBLIC",
-    previewText: "音色清透偏高，带自然甜感，节奏轻快但不浮，语气坚定、有朝气。"
+    previewText: "A bright upper register with a natural sweetness, brisk rhythm, and confident energy."
   },
   {
     id: "2001931510222950400",
-    name: "程述",
+    name: "Chengshu",
     language: "Chinese",
     gender: "Male",
-    style: "播客理性",
+    style: "Podcast analytical",
     scenario: "Public Voice",
     source: "system",
-    availableModels: ["vox-lite-v1", "vox-prime-v1"],
+    availableModels: ["auralith-one-1.0", "auralith-ultra-1.0"],
     favorite: false,
     status: "PUBLIC",
-    previewText: "中低音偏中，发音清晰标准，语速自然不过快，语气沉稳但不老成，带轻微电台感与亲和力。"
+    previewText: "A balanced mid-low register with clear diction, natural pacing, and a composed editorial tone."
   },
   {
     id: "2002941772480647168",
-    name: "阿宁",
+    name: "Aning",
     language: "Chinese",
     gender: "Unknown",
-    style: "温柔",
+    style: "Gentle",
     scenario: "Public Voice",
     source: "system",
-    availableModels: ["vox-lite-v1", "vox-prime-v1"],
+    availableModels: ["auralith-one-1.0", "auralith-ultra-1.0"],
     favorite: false,
     status: "PUBLIC",
-    previewText: "声音柔和而稳定，不催促、不打断，给人被照顾的安心感。"
+    previewText: "Soft, stable, and reassuring, with a patient cadence that feels supportive rather than urgent."
   },
   {
     id: "2002991117984862208",
-    name: "梁子",
+    name: "Liangzi",
     language: "Chinese",
     gender: "Male",
-    style: "新闻专业",
+    style: "Broadcast professional",
     scenario: "Public Voice",
     source: "system",
-    availableModels: ["vox-lite-v1", "vox-prime-v1"],
+    availableModels: ["auralith-one-1.0", "auralith-ultra-1.0"],
     favorite: false,
     status: "PUBLIC",
-    previewText: "咬字清晰，但语气放松，不会给人太多的听感压力。"
+    previewText: "Clear articulation with a professional news-style profile, but relaxed enough for long-form listening."
   }
 ];
 
@@ -137,10 +137,17 @@ export function isCuratedVoiceId(id: string) {
   return (CURATED_VOICE_IDS as readonly string[]).includes(id);
 }
 
-export function pickPlaygroundVoices(allVoices: Voice[]) {
+export function pickPlaygroundVoices(allVoices: Voice[], selectedVoiceId?: string) {
   const curated = allVoices.filter((voice) => isCuratedVoiceId(voice.id));
-  if (curated.length > 0) {
-    return CURATED_VOICE_IDS.map((id) => curated.find((voice) => voice.id === id)).filter((voice): voice is Voice => Boolean(voice));
-  }
-  return curatedPublicVoices;
+  const prioritized = curated.length > 0
+    ? CURATED_VOICE_IDS.map((id) => curated.find((voice) => voice.id === id)).filter((voice): voice is Voice => Boolean(voice))
+    : curatedPublicVoices;
+
+  if (!selectedVoiceId) return prioritized;
+
+  const selectedVoice = allVoices.find((voice) => voice.id === selectedVoiceId);
+  if (!selectedVoice) return prioritized;
+  if (prioritized.some((voice) => voice.id === selectedVoiceId)) return prioritized;
+
+  return [selectedVoice, ...prioritized];
 }

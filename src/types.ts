@@ -14,7 +14,7 @@ export type Route =
 
 export type Role = "Admin" | "Developer" | "Creator";
 
-export type ModelId = "vox-lite-v1" | "vox-prime-v1";
+export type ModelId = "auralith-one-1.0" | "auralith-ultra-1.0";
 
 export type VoiceSource = "system" | "cloned" | "designed";
 
@@ -31,6 +31,8 @@ export interface Voice {
   status?: string;
   previewText?: string;
   createdAt?: string | null;
+  ownedByUser?: boolean;
+  avatarTone?: string;
 }
 
 export interface ModelInfo {
@@ -83,4 +85,56 @@ export interface ApiKey {
   createdAt: string;
   lastUsedAt: string;
   status: "Active" | "Disabled";
+}
+
+export interface PricingPlan {
+  id: string;
+  name: string;
+  price: string;
+  quota: string;
+  modelAccess: string;
+  teamSeats: string;
+  ctaLabel: string;
+  highlighted?: boolean;
+  features: string[];
+  status?: "Published" | "Draft";
+}
+
+export interface UsagePolicy {
+  monthlyQuota: number;
+  concurrencyLimit: number;
+  alertThreshold: number;
+  overageAction: "Notify" | "Throttle" | "Block";
+}
+
+export interface AuditEvent {
+  id: string;
+  time: string;
+  actor: string;
+  action: string;
+  resource: string;
+  severity: "info" | "warn" | "critical";
+}
+
+export interface VoiceGovernance {
+  voiceId: string;
+  visibility: "Public" | "Private" | "Restricted";
+  reviewStatus: "Approved" | "Needs review" | "Flagged";
+  consentStatus: "Verified" | "Pending" | "Missing";
+}
+
+export interface UsageSnapshot {
+  time: string;
+  characters: number;
+  requests: number;
+}
+
+export interface AdminState {
+  teamMembers: TeamMember[];
+  apiKeys: ApiKey[];
+  pricingPlans: PricingPlan[];
+  pricingDrafts: PricingPlan[];
+  usagePolicy: UsagePolicy;
+  auditEvents: AuditEvent[];
+  voiceGovernance: Record<string, VoiceGovernance>;
 }

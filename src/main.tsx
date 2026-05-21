@@ -1,32 +1,61 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { apiKeys as seedApiKeys, apiLogs as seedApiLogs, initialGenerations, models, teamMembers, voices as seedVoices } from "./mockData";
-import { cloneVoice, deleteVoice, fetchLiveVoices, fetchVoiceStatus, previewDesignedVoice, saveDesignedVoice, synthesizeSpeech, toDataUrl } from "./api";
+import {
+  apiKeys as seedApiKeys,
+  apiLogs as seedApiLogs,
+  auditEvents as seedAuditEvents,
+  initialGenerations,
+  models,
+  pricingPlans as seedPricingPlans,
+  teamMembers as seedTeamMembers,
+  usagePolicy as seedUsagePolicy,
+  usageSnapshots as seedUsageSnapshots,
+  voiceGovernance as seedVoiceGovernance,
+  voices as seedVoices
+} from "./mockData";
+import { cloneVoice, deleteVoice, fetchAdminState, fetchLiveVoices, fetchPublicPricingPlans, fetchVoiceStatus, loginSession, logoutSession, previewDesignedVoice, publishPricingDrafts, saveAdminState, saveDesignedVoice, synthesizeSpeech, toDataUrl, updateVoiceSource } from "./api";
 import { pickPlaygroundVoices } from "./curatedVoices";
-import type { ApiKey, ApiLog, Generation, ModelId, Role, Route, Voice } from "./types";
+import type {
+  AdminState,
+  ApiKey,
+  ApiLog,
+  AuditEvent,
+  Generation,
+  ModelId,
+  PricingPlan,
+  Role,
+  Route,
+  TeamMember,
+  UsagePolicy,
+  UsageSnapshot,
+  Voice,
+  VoiceGovernance
+} from "./types";
 import { copyToClipboard, makeRequestId } from "./utils";
 import "../styles.css";
 
-const routes: Route[] = ["home", "playground", "models", "voices", "clone", "design", "docs", "usage", "logs", "pricing", "safety", "team"];
+const routes: Route[] = ["home", "models", "voices", "playground", "clone", "design", "docs", "usage", "logs", "pricing", "safety", "team"];
+const VOICE_OVERRIDE_STORAGE_KEY = "auralith-voice-overrides";
+const VOICE_AVATAR_TONES = ["emerald", "ocean", "sunset", "rose", "violet", "slate"] as const;
 
 const roleConfig: Record<Role, { defaultRoute: Route; routes: Route[]; summary: string; focus: string[] }> = {
   Admin: {
     defaultRoute: "team",
-    routes: ["home", "playground", "models", "voices", "clone", "design", "docs", "usage", "logs", "pricing", "safety", "team"],
-    summary: "Manage team, API keys, usage, billing and safety controls.",
-    focus: ["Team", "API Keys", "Usage", "Logs", "Pricing", "Safety"]
+    routes: ["usage", "logs", "pricing", "safety", "team"],
+    summary: "Manage platform usage, investigate operations, review voice safety, and administer team access.",
+    focus: ["Team", "Usage", "Logs", "Pricing", "Safety"]
   },
   Developer: {
     defaultRoute: "docs",
-    routes: ["home", "playground", "models", "voices", "docs", "usage", "logs"],
-    summary: "Integrate TTS API, inspect your own logs and debug model or voice parameters.",
-    focus: ["Docs", "Playground", "Models", "Voices", "Logs", "Usage"]
+    routes: ["home", "models", "voices", "playground", "docs", "usage", "logs", "pricing"],
+    summary: "Integrate TTS API, inspect your own logs, and design or debug voice experiences.",
+    focus: ["Docs", "Playground", "Models", "Voices", "Logs", "Usage", "Pricing"]
   },
   Creator: {
     defaultRoute: "playground",
-    routes: ["home", "playground", "models", "voices", "clone", "design"],
+    routes: ["home", "models", "voices", "playground", "pricing"],
     summary: "Create speech, choose voices, clone voices and design new voice styles.",
-    focus: ["Playground", "Voices", "Clone", "Design", "Models"]
+    focus: ["Playground", "Voices", "Models", "Pricing"]
   }
 };
 
@@ -51,16 +80,113 @@ function formatDuration(seconds: number | null) {
   return `${minutes}:${String(remainder).padStart(2, "0")}`;
 }
 
+function parsePlanQuota(quota: string) {
+  const lower = quota.toLowerCase();
+  const amount = Number.parseFloat(lower.replace(/[^0-9.]/g, ""));
+  if (Number.isNaN(amount)) return 0;
+  if (lower.includes("m")) return Math.round(amount * 1_000_000);
+  if (lower.includes("k")) return Math.round(amount * 1_000);
+  return Math.round(amount);
+}
+
+function getPricingValidationErrors(plan: PricingPlan) {
+  const errors: string[] = [];
+  if (!plan.name.trim()) errors.push("Plan name is required.");
+  if (!plan.price.trim()) errors.push("Price is required.");
+  if (!plan.quota.trim()) errors.push("Quota is required.");
+  if (!plan.ctaLabel.trim()) errors.push("CTA label is required.");
+  if (!plan.modelAccess.trim()) errors.push("Model access is required.");
+  if (!plan.teamSeats.trim()) errors.push("Team seat policy is required.");
+  if (plan.features.length === 0) errors.push("At least one plan feature is required.");
+  return errors;
+}
+
+function moveItem<T>(items: T[], fromIndex: number, direction: -1 | 1) {
+  const nextIndex = fromIndex + direction;
+  if (fromIndex < 0 || nextIndex < 0 || nextIndex >= items.length) return items;
+  const copy = [...items];
+  const [item] = copy.splice(fromIndex, 1);
+  copy.splice(nextIndex, 0, item);
+  return copy;
+}
+
+function makeDefaultGovernance(voice: Voice): VoiceGovernance {
+  return {
+    voiceId: voice.id,
+    visibility: voice.source === "system" ? "Public" : "Private",
+    reviewStatus: voice.source === "system" ? "Approved" : "Needs review",
+    consentStatus: voice.source === "system" ? "Verified" : "Pending"
+  };
+}
+
+function readVoiceOverrides(): Record<string, Partial<Pick<Voice, "source" | "name" | "ownedByUser" | "avatarTone">>> {
+  try {
+    const raw = localStorage.getItem(VOICE_OVERRIDE_STORAGE_KEY);
+    return raw ? JSON.parse(raw) : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeVoiceOverrides(overrides: Record<string, Partial<Pick<Voice, "source" | "name" | "ownedByUser" | "avatarTone">>>) {
+  localStorage.setItem(VOICE_OVERRIDE_STORAGE_KEY, JSON.stringify(overrides));
+}
+
+function rememberVoiceOverride(voiceId: string, override: Partial<Pick<Voice, "source" | "name" | "ownedByUser" | "avatarTone">>) {
+  const current = readVoiceOverrides();
+  current[voiceId] = { ...(current[voiceId] || {}), ...override };
+  writeVoiceOverrides(current);
+}
+
+function applyVoiceOverrides(voices: Voice[]) {
+  const overrides = readVoiceOverrides();
+  return voices.map((voice) => {
+    const override = overrides[voice.id];
+    if (!override) return voice;
+    return {
+      ...voice,
+      ...override
+    };
+  });
+}
+
+function getVoiceInitials(name: string) {
+  return name
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((part) => part[0]?.toUpperCase() || "")
+    .join("") || "V";
+}
+
+function inferMemberNameFromEmail(email: string) {
+  const localPart = email.split("@")[0] || "teammate";
+  return localPart
+    .split(/[._-]+/)
+    .filter(Boolean)
+    .map((part) => part[0]?.toUpperCase() + part.slice(1))
+    .join(" ") || "Teammate";
+}
+
 function App() {
   const [route, setRoute] = useState<Route>(getRoute);
   const [role, setRole] = useState<Role | null>(() => (localStorage.getItem("voxai-role") as Role | null) ?? null);
   const [voices, setVoices] = useState<Voice[]>(seedVoices);
   const [generations, setGenerations] = useState<Generation[]>(initialGenerations);
   const [logs, setLogs] = useState<ApiLog[]>(seedApiLogs);
+  const [teamMembers, setTeamMembers] = useState<TeamMember[]>(seedTeamMembers);
   const [apiKeys, setApiKeys] = useState<ApiKey[]>(seedApiKeys);
+  const [pricingPlans, setPricingPlans] = useState<PricingPlan[]>(seedPricingPlans);
+  const [pricingDrafts, setPricingDrafts] = useState<PricingPlan[]>(seedPricingPlans.map((plan) => ({ ...plan, status: "Published" })));
+  const [usagePolicy, setUsagePolicy] = useState<UsagePolicy>(seedUsagePolicy);
+  const [usageSnapshots] = useState<UsageSnapshot[]>(seedUsageSnapshots);
+  const [auditEvents, setAuditEvents] = useState<AuditEvent[]>(seedAuditEvents);
+  const [voiceGovernance, setVoiceGovernance] = useState<Record<string, VoiceGovernance>>(Object.fromEntries(seedVoiceGovernance.map((item) => [item.voiceId, item])));
+  const [adminStateLoaded, setAdminStateLoaded] = useState(false);
   const [showApiKeyModal, setShowApiKeyModal] = useState(false);
   const [selectedLog, setSelectedLog] = useState<ApiLog | null>(null);
   const [selectedVoiceId, setSelectedVoiceId] = useState<string>(seedVoices[0]?.id ?? "");
+  const [focusedVoiceId, setFocusedVoiceId] = useState<string | null>(null);
   const [voicesLoading, setVoicesLoading] = useState(false);
   const [voicesError, setVoicesError] = useState<string | null>(null);
 
@@ -73,6 +199,10 @@ function App() {
 
   useEffect(() => {
     if (!role) return;
+    if (route === "clone" || route === "design") {
+      window.location.hash = "#playground";
+      return;
+    }
     const allowedRoutes = roleConfig[role].routes;
     if (!allowedRoutes.includes(route)) {
       window.location.hash = `#${roleConfig[role].defaultRoute}`;
@@ -88,8 +218,9 @@ function App() {
       .then((payload) => {
         if (cancelled) return;
         if (payload.voices.length) {
-          setVoices((current) => mergeVoices(payload.voices, current));
-          setSelectedVoiceId((current) => (payload.voices.some((voice) => voice.id === current) ? current : payload.voices[0].id));
+          const nextVoices = applyVoiceOverrides(payload.voices);
+          setVoices((current) => mergeVoices(nextVoices, current));
+          setSelectedVoiceId((current) => (nextVoices.some((voice) => voice.id === current) ? current : nextVoices[0].id));
         }
       })
       .catch((error: Error) => {
@@ -104,13 +235,58 @@ function App() {
     };
   }, [role]);
 
-  function loginAs(nextRole: Role) {
+  useEffect(() => {
+    let cancelled = false;
+    setAdminStateLoaded(false);
+    const load = role === "Admin" ? fetchAdminState().then((payload) => {
+      if (cancelled) return;
+      if (payload.teamMembers) setTeamMembers(payload.teamMembers);
+      if (payload.apiKeys) setApiKeys(payload.apiKeys);
+      if (payload.pricingPlans) setPricingPlans(payload.pricingPlans);
+      if (payload.pricingDrafts) setPricingDrafts(payload.pricingDrafts);
+      if (payload.usagePolicy) setUsagePolicy(payload.usagePolicy);
+      if (payload.auditEvents) setAuditEvents(payload.auditEvents);
+      if (payload.voiceGovernance) setVoiceGovernance(payload.voiceGovernance);
+    }) : fetchPublicPricingPlans().then((payload) => {
+      if (!cancelled) setPricingPlans(payload.plans);
+    });
+
+    load.finally(() => {
+      if (!cancelled) setAdminStateLoaded(true);
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [role]);
+
+  useEffect(() => {
+    if (!adminStateLoaded || role !== "Admin") return;
+    const timer = window.setTimeout(() => {
+      const payload: AdminState = {
+        teamMembers,
+        apiKeys,
+        pricingPlans,
+        pricingDrafts,
+        usagePolicy,
+        auditEvents,
+        voiceGovernance
+      };
+      void saveAdminState(payload);
+    }, 250);
+
+    return () => window.clearTimeout(timer);
+  }, [adminStateLoaded, teamMembers, apiKeys, pricingPlans, pricingDrafts, usagePolicy, auditEvents, voiceGovernance]);
+
+  async function loginAs(nextRole: Role) {
+    await loginSession(nextRole);
     setRole(nextRole);
     localStorage.setItem("voxai-role", nextRole);
     window.location.hash = `#${roleConfig[nextRole].defaultRoute}`;
   }
 
-  function logout() {
+  async function logout() {
+    await logoutSession();
     setRole(null);
     localStorage.removeItem("voxai-role");
     window.location.hash = "#home";
@@ -124,14 +300,30 @@ function App() {
     setLogs((current) => [log, ...current].slice(0, 20));
   }
 
+  function addAuditEvent(action: string, resource: string, severity: AuditEvent["severity"] = "info", actor = "Admin") {
+    const now = new Date();
+    setAuditEvents((current) => [
+      {
+        id: `audit_${Date.now().toString(16)}`,
+        time: now.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+        actor,
+        action,
+        resource,
+        severity
+      },
+      ...current
+    ].slice(0, 12));
+  }
+
   async function refreshVoices() {
     setVoicesLoading(true);
     setVoicesError(null);
     try {
       const payload = await fetchLiveVoices();
-      setVoices((current) => mergeVoices(payload.voices, current));
-      if (payload.voices.length) {
-        setSelectedVoiceId((current) => (payload.voices.some((voice) => voice.id === current) ? current : payload.voices[0].id));
+      const nextVoices = applyVoiceOverrides(payload.voices);
+      setVoices((current) => mergeVoices(nextVoices, current));
+      if (nextVoices.length) {
+        setSelectedVoiceId((current) => (nextVoices.some((voice) => voice.id === current) ? current : nextVoices[0].id));
       }
     } catch (error) {
       setVoicesError(error instanceof Error ? error.message : "Failed to refresh voices");
@@ -151,8 +343,17 @@ function App() {
   }
 
   function addVoice(voice: Voice) {
-    setVoices((current) => mergeVoices([voice], current));
-    setSelectedVoiceId(voice.id);
+    const existingOverride = readVoiceOverrides()[voice.id];
+    if (voice.source !== "system" && !existingOverride?.source) {
+      rememberVoiceOverride(voice.id, { source: voice.source, name: voice.name, ownedByUser: true });
+    }
+    const [nextVoice] = applyVoiceOverrides([voice]);
+    setVoices((current) => mergeVoices([nextVoice], current));
+    setSelectedVoiceId(nextVoice.id);
+  }
+
+  function openVoiceInLibrary(voiceId: string) {
+    setFocusedVoiceId(voiceId);
     window.location.hash = "#voices";
   }
 
@@ -168,29 +369,170 @@ function App() {
       },
       ...current
     ]);
+    addAuditEvent("Created API key", name);
     setShowApiKeyModal(false);
   }
 
+  function inviteTeamMember(email: string, nextRole: TeamMember["role"]) {
+    const normalizedEmail = email.trim().toLowerCase();
+    if (!normalizedEmail) return;
+    const existing = teamMembers.find((member) => member.email.toLowerCase() === normalizedEmail);
+    if (existing) {
+      setTeamMembers((current) =>
+        current.map((member) =>
+          member.email.toLowerCase() === normalizedEmail ? { ...member, role: nextRole, status: "Pending" } : member
+        )
+      );
+      addAuditEvent("Re-sent team invite", normalizedEmail, "warn");
+      return;
+    }
+
+    setTeamMembers((current) => [
+      {
+        name: inferMemberNameFromEmail(normalizedEmail),
+        email: normalizedEmail,
+        role: nextRole,
+        status: "Pending"
+      },
+      ...current
+    ]);
+    addAuditEvent("Invited team member", normalizedEmail, "info");
+  }
+
+  function updateTeamMember(email: string, patch: Partial<TeamMember>) {
+    const target = teamMembers.find((member) => member.email === email);
+    if (!target) return;
+    setTeamMembers((current) => current.map((member) => (member.email === email ? { ...member, ...patch } : member)));
+    if (patch.role && patch.role !== target.role) addAuditEvent("Updated team role", `${target.email} → ${patch.role}`, "warn");
+    if (patch.status && patch.status !== target.status) addAuditEvent("Updated team member status", `${target.email} → ${patch.status}`, patch.status === "Pending" ? "warn" : "info");
+  }
+
+  function removeTeamMember(email: string) {
+    const target = teamMembers.find((member) => member.email === email);
+    if (!target || target.role === "Owner") return;
+    setTeamMembers((current) => current.filter((member) => member.email !== email));
+    addAuditEvent("Removed team member", target.email, "warn");
+  }
+
+  function updatePricingPlan(planId: string, patch: Partial<PricingPlan>) {
+    setPricingDrafts((current) => current.map((plan) => (plan.id === planId ? { ...plan, ...patch, status: "Draft" } : plan)));
+  }
+
+  function addPricingDraft() {
+    const nextId = `custom_${Date.now().toString(16)}`;
+    setPricingDrafts((current) => [
+      ...current,
+      {
+        id: nextId,
+        name: "New Plan",
+        price: "$99",
+        quota: "5M chars",
+        modelAccess: "Auralith One + Auralith Ultra",
+        teamSeats: "10 team seats",
+        ctaLabel: "Choose plan",
+        highlighted: false,
+        features: ["Usage analytics", "Priority support"],
+        status: "Draft"
+      }
+    ]);
+    addAuditEvent("Created pricing draft", nextId, "info");
+  }
+
+  function removePricingDraft(planId: string) {
+    const target = pricingDrafts.find((plan) => plan.id === planId);
+    if (!target) return;
+    setPricingDrafts((current) => current.filter((plan) => plan.id !== planId));
+    addAuditEvent("Removed pricing draft", target.name, "warn");
+  }
+
+  function duplicatePricingDraft(planId: string) {
+    const target = pricingDrafts.find((plan) => plan.id === planId);
+    if (!target) return;
+    const duplicate = {
+      ...target,
+      id: `copy_${Date.now().toString(16)}`,
+      name: `${target.name} Copy`,
+      status: "Draft" as const,
+      highlighted: false
+    };
+    setPricingDrafts((current) => [...current, duplicate]);
+    addAuditEvent("Duplicated pricing draft", target.name, "info");
+  }
+
+  function movePricingDraft(planId: string, direction: -1 | 1) {
+    const index = pricingDrafts.findIndex((plan) => plan.id === planId);
+    if (index === -1) return;
+    setPricingDrafts((current) => moveItem(current, index, direction).map((plan) => ({ ...plan, status: "Draft" as const })));
+    addAuditEvent(direction === -1 ? "Moved pricing draft up" : "Moved pricing draft down", planId, "info");
+  }
+
+  async function publishPricingChanges() {
+    const payload = await publishPricingDrafts();
+    const nextPublished = payload.pricingPlans;
+    setPricingPlans(nextPublished);
+    setPricingDrafts(payload.pricingDrafts);
+    setUsagePolicy((current) => ({
+      ...current,
+      monthlyQuota: nextPublished.reduce((max, plan) => Math.max(max, parsePlanQuota(plan.quota)), current.monthlyQuota)
+    }));
+    addAuditEvent("Published pricing changes", "Pricing", "info");
+  }
+
+  function resetPricingDrafts() {
+    setPricingDrafts(pricingPlans.map((plan) => ({ ...plan, status: "Published" as const })));
+    addAuditEvent("Reset pricing draft", "Pricing", "warn");
+  }
+
+  function updateUsageSettings(nextPolicy: UsagePolicy) {
+    setUsagePolicy(nextPolicy);
+    addAuditEvent("Updated usage policy", `${nextPolicy.monthlyQuota.toLocaleString()} chars`, "warn");
+  }
+
+  function toggleApiKeyStatus(keyId: string) {
+    const target = apiKeys.find((key) => key.id === keyId);
+    if (!target) return;
+    const nextStatus = target.status === "Active" ? "Disabled" : "Active";
+    setApiKeys((current) => current.map((key) => (key.id === keyId ? { ...key, status: nextStatus } : key)));
+    addAuditEvent(`${nextStatus === "Disabled" ? "Disabled" : "Re-enabled"} API key`, target.name, nextStatus === "Disabled" ? "warn" : "info");
+  }
+
+  function updateVoicePolicy(voiceId: string, patch: Partial<VoiceGovernance>) {
+    const voice = voices.find((item) => item.id === voiceId);
+    const current = voiceGovernance[voiceId] ?? (voice ? makeDefaultGovernance(voice) : null);
+    if (!current) return;
+
+    const next = { ...current, ...patch };
+    setVoiceGovernance((currentMap) => ({ ...currentMap, [voiceId]: next }));
+
+    if (patch.reviewStatus) addAuditEvent(`Updated voice review`, `${voice?.name ?? voiceId} → ${patch.reviewStatus}`, patch.reviewStatus === "Flagged" ? "critical" : "warn");
+    if (patch.visibility) addAuditEvent("Updated voice visibility", `${voice?.name ?? voiceId} → ${patch.visibility}`);
+    if (patch.consentStatus) addAuditEvent("Updated voice consent", `${voice?.name ?? voiceId} → ${patch.consentStatus}`, patch.consentStatus === "Missing" ? "critical" : "warn");
+  }
+
   if (!role) {
-    return <RoleLogin onLogin={loginAs} />;
+    return <RoleLogin onLogin={(nextRole) => { void loginAs(nextRole); }} />;
   }
 
   return (
     <div className="site-shell">
-      <Topbar route={route} role={role} onLogout={logout} onCreateApiKey={() => setShowApiKeyModal(true)} />
+      <Topbar route={route} role={role} onLogout={() => { void logout(); }} onCreateApiKey={() => setShowApiKeyModal(true)} />
       <main>
         {route === "home" && <Home voices={voices} generations={generations} />}
         {route === "playground" && (
-          <Playground
-            voices={voices}
-            onGenerate={addGeneration}
-            onLog={addLog}
-            generations={generations}
-            selectedVoiceId={selectedVoiceId}
-            onSelectVoice={setSelectedVoiceId}
-            voicesLoading={voicesLoading}
-            voicesError={voicesError}
-          />
+          <>
+            <Playground
+              voices={voices}
+              onGenerate={addGeneration}
+              onLog={addLog}
+              generations={generations}
+              selectedVoiceId={selectedVoiceId}
+              onSelectVoice={setSelectedVoiceId}
+              voicesLoading={voicesLoading}
+              voicesError={voicesError}
+            />
+            {role !== "Admin" && <Clone onCreateVoice={addVoice} onLog={addLog} onDeleteVoice={removeVoice} onRefreshVoices={refreshVoices} onOpenVoiceLibrary={openVoiceInLibrary} />}
+            {role !== "Admin" && <Design onCreateVoice={addVoice} onLog={addLog} onDeleteVoice={removeVoice} onRefreshVoices={refreshVoices} onOpenVoiceLibrary={openVoiceInLibrary} />}
+          </>
         )}
         {route === "models" && <Models />}
         {route === "voices" && (
@@ -205,16 +547,71 @@ function App() {
             onRefreshVoices={refreshVoices}
             voicesLoading={voicesLoading}
             voicesError={voicesError}
+            focusedVoiceId={focusedVoiceId}
+            onFocusHandled={() => setFocusedVoiceId(null)}
           />
         )}
-        {route === "clone" && <Clone onCreateVoice={addVoice} onLog={addLog} onDeleteVoice={removeVoice} onRefreshVoices={refreshVoices} />}
-        {route === "design" && <Design onCreateVoice={addVoice} onLog={addLog} onDeleteVoice={removeVoice} onRefreshVoices={refreshVoices} />}
         {route === "docs" && <Docs />}
-        {route === "usage" && <Usage role={role} generations={generations} logs={logs} onSelectLog={setSelectedLog} />}
-        {route === "logs" && <Logs role={role} logs={logs} onSelectLog={setSelectedLog} />}
-        {route === "pricing" && <Pricing />}
-        {route === "safety" && role === "Admin" && <Safety />}
-        {route === "team" && <Team apiKeys={apiKeys} onCreateApiKey={() => setShowApiKeyModal(true)} />}
+        {route === "usage" && (
+          <Usage
+            role={role}
+            generations={generations}
+            logs={logs}
+            onSelectLog={setSelectedLog}
+            usagePolicy={usagePolicy}
+            onUpdateUsagePolicy={updateUsageSettings}
+            usageSnapshots={usageSnapshots}
+            voices={voices}
+            voiceGovernance={voiceGovernance}
+            onUpdateVoiceGovernance={updateVoicePolicy}
+          />
+        )}
+        {route === "logs" && (
+          <Logs
+            role={role}
+            logs={logs}
+            onSelectLog={setSelectedLog}
+            apiKeys={apiKeys}
+            auditEvents={auditEvents}
+            onCreateApiKey={() => setShowApiKeyModal(true)}
+            onToggleApiKeyStatus={toggleApiKeyStatus}
+          />
+        )}
+        {route === "pricing" && (
+          <Pricing
+            role={role}
+            plans={pricingPlans}
+            drafts={pricingDrafts}
+            onUpdatePlan={updatePricingPlan}
+            onPublishChanges={publishPricingChanges}
+            onResetDrafts={resetPricingDrafts}
+            onAddDraft={addPricingDraft}
+            onRemoveDraft={removePricingDraft}
+            onDuplicateDraft={duplicatePricingDraft}
+            onMoveDraft={movePricingDraft}
+          />
+        )}
+        {route === "safety" && role === "Admin" && (
+          <Safety
+            voices={voices}
+            apiKeys={apiKeys}
+            usagePolicy={usagePolicy}
+            auditEvents={auditEvents}
+            voiceGovernance={voiceGovernance}
+            onUpdateVoiceGovernance={updateVoicePolicy}
+          />
+        )}
+        {route === "team" && role === "Admin" && (
+          <Team
+            members={teamMembers}
+            apiKeys={apiKeys}
+            auditEvents={auditEvents}
+            onCreateApiKey={() => setShowApiKeyModal(true)}
+            onInviteMember={inviteTeamMember}
+            onUpdateMember={updateTeamMember}
+            onRemoveMember={removeTeamMember}
+          />
+        )}
       </main>
       {showApiKeyModal && <ApiKeyModal onClose={() => setShowApiKeyModal(false)} onCreate={createApiKey} />}
       {selectedLog && <LogDrawer log={selectedLog} onClose={() => setSelectedLog(null)} />}
@@ -226,10 +623,9 @@ function RoleLogin({ onLogin }: { onLogin: (role: Role) => void }) {
   return (
     <main className="login-page">
       <section className="login-hero">
-        <span className="brand login-brand"><span className="brand-mark" />VoxAI</span>
-        <span className="eyebrow">Role-based workspace</span>
-        <h1>Choose how you want to enter the voice platform.</h1>
-        <p>不同角色会加载不同的默认页面和功能导航。后续接入真实账号系统时，可由后端返回 role 和 permissions。</p>
+        <span className="brand login-brand"><span className="brand-mark" />Auralith</span>
+        <h1>Choose a role to enter the voice platform.</h1>
+        <p>Each role loads a different default view and navigation set. In production, roles and permissions would come from the identity service.</p>
       </section>
       <section className="role-grid">
         {(Object.keys(roleConfig) as Role[]).map((item) => (
@@ -250,11 +646,12 @@ function RoleLogin({ onLogin }: { onLogin: (role: Role) => void }) {
 
 function Topbar({ route, role, onLogout, onCreateApiKey }: { route: Route; role: Role; onLogout: () => void; onCreateApiKey: () => void }) {
   const visibleRoutes = roleConfig[role].routes;
+  const homeHref = visibleRoutes.includes("home") ? "#home" : `#${roleConfig[role].defaultRoute}`;
   return (
     <header className="topbar">
-      <a className="brand" href="#home" aria-label="VoxAI Home">
+      <a className="brand" href={homeHref} aria-label="Auralith Home">
         <span className="brand-mark" />
-        <span>VoxAI</span>
+        <span>Auralith</span>
       </a>
       <nav className="main-nav" aria-label="Main navigation">
         {visibleRoutes.map((item) => (
@@ -264,19 +661,15 @@ function Topbar({ route, role, onLogout, onCreateApiKey }: { route: Route; role:
         ))}
       </nav>
       <div className="topbar-actions">
-        {(role === "Admin" || role === "Developer") && (
+        {role === "Admin" && (
           <button className="ghost-action" onClick={onCreateApiKey}>
             Create API Key
           </button>
         )}
         <span className="role-chip">{role}</span>
         <button className="ghost-action" onClick={onLogout}>Switch role</button>
-        <a className="ghost-link" href="#docs">
-          API Docs
-        </a>
-        <a className="console-button" href="#playground">
-          Try Playground
-        </a>
+        {visibleRoutes.includes("docs") && <a className="ghost-link" href="#docs">API Docs</a>}
+        {visibleRoutes.includes("playground") && <a className="console-button" href="#playground">Open Playground</a>}
       </div>
     </header>
   );
@@ -302,18 +695,17 @@ function Home({ voices, generations }: { voices: Voice[]; generations: Generatio
     <>
       <section className="hero">
         <div className="hero-copy">
-          <span className="eyebrow">Multilingual TTS API Platform</span>
           <h1>Engineering-grade voice intelligence for multilingual products.</h1>
           <p>
-            用 VoxLite 和 VoxPrime 构建低延迟、多语言、可克隆、可设计的 AI 语音服务。从 Playground 试音，到
-            API、WebSocket、声音资产管理，一套平台完成。
+            Build multilingual voice workflows with Auralith One and Auralith Ultra.
+            Go from instant text to speech generation to reusable voice assets and production-ready API delivery in one system.
           </p>
           <div className="hero-actions">
             <a className="primary-button" href="#playground">
-              Try Playground
+              Open Playground
             </a>
             <a className="secondary-button" href="#docs">
-              View API Docs
+              Open API Docs
             </a>
             <a className="text-button" href="#voices">
               Explore Voices
@@ -322,30 +714,30 @@ function Home({ voices, generations }: { voices: Voice[]; generations: Generatio
           <div className="hero-metrics">
             <Metric value="2" label="Model series" />
             <Metric value="40+" label="Languages" />
-            <Metric value="WS" label="Streaming ready" />
+            <Metric value="Pro" label="Voice control" />
           </div>
         </div>
-        <DemoPanel />
+        <DemoPanel voices={voices} />
       </section>
 
       <section className="section">
         <div className="section-heading">
-          <span className="eyebrow">Core capabilities</span>
-          <h2>把 MiniMax 式 API 平台和 ElevenLabs 式声音体验结合起来。</h2>
+          <span className="eyebrow">Core Capabilities</span>
+          <h2>Combine API-first delivery with a production voice workflow.</h2>
         </div>
         <div className="feature-grid">
-          <Feature href="#docs" icon="API" title="Text to Speech API" text="HTTP 接口支持模型、voice_id、语言、音频格式和 request_id 追踪。" />
-          <Feature href="#playground" icon="WS" title="Streaming TTS" text="面向实时对话和语音助手，展示首包延迟、chunk 和会话状态。" />
-          <Feature href="#clone" icon="VC" title="Voice Clone" text="上传或录制样本，完成质量检测、授权确认，并生成稳定 voice_id。" />
-          <Feature href="#design" icon="VD" title="Voice Design" text="通过自然语言描述生成候选音色，试听后保存到声音库。" />
+          <Feature href="#docs" icon="API" title="Text to Speech API" text="HTTP endpoints support model selection, voice IDs, language routing, audio formats, and request tracking." />
+          <Feature href="#playground" icon="EXP" title="Expressive TTS" text="Designed for nuanced delivery, richer emotional control, and premium long-form voice experiences." />
+          <Feature href="#clone" icon="VC" title="Voice Clone" text="Upload or record a sample, pass consent and quality checks, and create a reusable voice ID." />
+          <Feature href="#playground" icon="VD" title="Voice Design" text="Describe a target voice in natural language, preview it, and save it into the library." />
         </div>
       </section>
 
       <section className="section split-section">
         <div>
-          <span className="eyebrow">Model system</span>
-          <h2>VoxLite for speed. VoxPrime for expression.</h2>
-          <p>对外不暴露参数规模，用清晰的体验定位和版本号管理模型升级。</p>
+          <span className="eyebrow">Model System</span>
+          <h2>Auralith One for speed. Auralith Ultra for expression.</h2>
+          <p>Choose Auralith One for responsive, cost-efficient generation, or Auralith Ultra for richer emotion, nuance, and premium long-form delivery.</p>
         </div>
         <div className="model-pair">
           {models.map((model) => (
@@ -359,7 +751,7 @@ function Home({ voices, generations }: { voices: Voice[]; generations: Generatio
       </section>
 
       <section className="section dashboard-preview">
-        <SummaryPanel voices={voices} generations={generations} />
+        <SummaryPanel voices={voices} />
       </section>
     </>
   );
@@ -374,36 +766,92 @@ function Metric({ value, label }: { value: string; label: string }) {
   );
 }
 
-function DemoPanel() {
-  const [playing, setPlaying] = useState(false);
+function DemoPanel({ voices }: { voices: Voice[] }) {
+  const demoVoices = useMemo(() => pickPlaygroundVoices(voices).slice(0, 2), [voices]);
+  const fallbackVoiceId = demoVoices[0]?.id ?? "2020008594694475776";
+  const [text, setText] = useState("Welcome to Auralith. Generate stable, natural, and controllable speech for your product with multilingual voice models.");
+  const [model, setModel] = useState<ModelId>("auralith-ultra-1.0");
+  const [voiceId, setVoiceId] = useState(fallbackVoiceId);
+  const [status, setStatus] = useState<"ready" | "generating" | "failed">("ready");
+  const [error, setError] = useState<string | null>(null);
+  const [audioUrl, setAudioUrl] = useState("");
+  const [durationLabel, setDurationLabel] = useState("0:00");
+
+  useEffect(() => {
+    if (!demoVoices.length) return;
+    if (!demoVoices.some((voice) => voice.id === voiceId)) {
+      setVoiceId(demoVoices[0].id);
+    }
+  }, [demoVoices, voiceId]);
+
+  async function generateDemo() {
+    if (!voiceId) {
+      setError("No demo voice is available yet.");
+      setStatus("failed");
+      return;
+    }
+
+    setStatus("generating");
+    setError(null);
+    try {
+      const result = await synthesizeSpeech({
+        text,
+        voiceId,
+        model
+      });
+      setAudioUrl(toDataUrl(result.audioBase64, result.audioMimeType));
+      setDurationLabel(formatDuration(result.durationSeconds));
+      setStatus("ready");
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "Synthesis failed");
+      setAudioUrl("");
+      setDurationLabel("0:00");
+      setStatus("failed");
+    }
+  }
+
   return (
     <div className="hero-demo panel dark-panel">
       <div className="panel-header">
         <span>Live TTS Demo</span>
-        <span className="status-pill ready">ready</span>
       </div>
-      <textarea aria-label="Demo text" defaultValue="欢迎使用 VoxAI。用多语言语音模型，为你的产品生成自然、稳定、可控的声音。" />
+      <textarea aria-label="Demo text" value={text} onChange={(event) => setText(event.target.value)} />
       <div className="control-grid compact">
         <label>
           Model
-          <select defaultValue="vox-prime-v1">
-            <option>vox-prime-v1</option>
-            <option>vox-lite-v1</option>
+          <select value={model} onChange={(event) => setModel(event.target.value as ModelId)}>
+            <option>auralith-ultra-1.0</option>
+            <option>auralith-one-1.0</option>
           </select>
         </label>
         <label>
           Voice
-          <select defaultValue="luna_warm">
-            <option>luna_warm</option>
-            <option>kai_clear</option>
+          <select value={voiceId} onChange={(event) => setVoiceId(event.target.value)}>
+            {demoVoices.map((voice) => (
+              <option key={voice.id} value={voice.id}>
+                {voice.name}
+              </option>
+            ))}
           </select>
         </label>
       </div>
-      <button className="generate-button" onClick={() => setPlaying((value) => !value)}>
-        Generate Speech
+      <button className="generate-button" onClick={() => void generateDemo()} disabled={status === "generating" || !voiceId}>
+        {status === "generating" ? "Generating..." : "Generate Speech"}
       </button>
-      <WavePlayer playing={playing} onToggle={() => setPlaying((value) => !value)} duration="0:08" />
-      <code className="inline-code">POST /v1/audio/speech · request_id: req_demo_42</code>
+      {audioUrl ? (
+        <audio className="native-audio" controls src={audioUrl} />
+      ) : status === "generating" ? (
+        <div className="audio-state-panel audio-state-panel-dark">
+          <WavePlayer playing onToggle={() => undefined} duration={durationLabel} />
+          <p>Generating audio preview...</p>
+        </div>
+      ) : (
+        <div className="audio-empty-state audio-empty-state-dark">
+          <strong>Click to generate a preview</strong>
+          <p>Try the live demo to hear the result instantly.</p>
+        </div>
+      )}
+      {error && <p className="inline-note error-note">{error}</p>}
     </div>
   );
 }
@@ -418,34 +866,45 @@ function Feature({ href, icon, title, text }: { href: string; icon: string; titl
   );
 }
 
-function SummaryPanel({ voices, generations }: { voices: Voice[]; generations: Generation[] }) {
+function SummaryPanel({ voices }: { voices: Voice[] }) {
+  const featuredVoices = voices.slice(0, 3);
+
   return (
-    <div className="overview-grid">
-      <section className="panel">
+    <div className="overview-grid home-overview-grid">
+      <section className="panel home-story-panel">
         <div className="panel-header">
-          <span>Recent generations</span>
-          <a href="#playground">Open</a>
+          <span>Built for production teams</span>
+          <a href="#docs">View API</a>
         </div>
-        <div className="stack-list">
-          {generations.slice(0, 3).map((generation) => (
-            <div key={generation.id} className="stack-item">
-              <span>{generation.text}</span>
-              <b>{generation.model}</b>
-            </div>
-          ))}
+        <div className="home-story-list">
+          <article>
+            <strong>Support and operations</strong>
+            <p>Use Auralith One for dependable, low-latency narration across alerts, onboarding, and transactional flows.</p>
+          </article>
+          <article>
+            <strong>Brand and content</strong>
+            <p>Use Auralith Ultra when tone, emotional detail, and long-form naturalness matter more than raw throughput.</p>
+          </article>
+          <article>
+            <strong>Reusable voice assets</strong>
+            <p>Move from system voices to cloned or designed voices without leaving the same product surface.</p>
+          </article>
         </div>
       </section>
-      <section className="panel">
+      <section className="panel home-voice-panel">
         <div className="panel-header">
-          <span>Recommended voices</span>
-          <a href="#voices">Explore</a>
+          <span>Featured voices</span>
+          <a href="#voices">Explore library</a>
         </div>
-        <div className="stack-list">
-          {voices.slice(0, 3).map((voice) => (
-            <div key={voice.id} className="stack-item">
-              <span>{voice.name}</span>
-              <b>{voice.id}</b>
-            </div>
+        <div className="featured-voice-list">
+          {featuredVoices.map((voice) => (
+            <article key={voice.id} className="featured-voice-row">
+              <div>
+                <strong>{voice.name}</strong>
+                <p>{voice.previewText || `${voice.language} · ${voice.style}`}</p>
+              </div>
+              <span>{voice.style}</span>
+            </article>
           ))}
         </div>
       </section>
@@ -472,8 +931,8 @@ function Playground({
   voicesLoading: boolean;
   voicesError: string | null;
 }) {
-  const [text, setText] = useState("欢迎使用 VoxAI 多语言语音平台，试试不同音色的表达效果。");
-  const [model, setModel] = useState<ModelId>("vox-prime-v1");
+  const [text, setText] = useState("Welcome to Auralith. Try the same script with different voices, models, and output formats.");
+  const [model, setModel] = useState<ModelId>("auralith-ultra-1.0");
   const [language, setLanguage] = useState("Chinese");
   const [format, setFormat] = useState<Generation["format"]>("mp3");
   const [status, setStatus] = useState<"idle" | "generating" | "succeeded" | "failed">("idle");
@@ -482,7 +941,7 @@ function Playground({
   const [audioUrl, setAudioUrl] = useState<string>("");
   const [durationLabel, setDurationLabel] = useState("0:00");
   const [creditCost, setCreditCost] = useState<number | null>(null);
-  const playgroundVoices = useMemo(() => pickPlaygroundVoices(voices), [voices]);
+  const playgroundVoices = useMemo(() => pickPlaygroundVoices(voices, selectedVoiceId), [selectedVoiceId, voices]);
   const selectedVoice = playgroundVoices.find((voice) => voice.id === selectedVoiceId) || null;
 
   useEffect(() => {
@@ -575,15 +1034,19 @@ function Playground({
 
   return (
     <section className="workspace">
-      <PageTitle eyebrow="Playground" title="TTS Playground" text="调试文本、模型、声音与输出格式，并实时生成等价 API 请求。" />
+      <PageTitle eyebrow="Playground" title="Speech Generation" text="Write your script, choose a voice, tune delivery settings, and generate production-ready speech." />
       <div className="playground-grid">
-        <section className="panel">
+        <section className="panel playground-input-panel">
           <div className="panel-header">
-            <span>Input</span>
-            <span className="status-pill">{status}</span>
+            <span>Speech setup</span>
           </div>
           <textarea className="large-input" value={text} onChange={(event) => setText(event.target.value)} />
           {voicesError && <p className="inline-note error-note">Voice load error: {voicesError}</p>}
+          <div className="playground-action-row">
+            <button className="generate-button playground-generate-button" onClick={generate} disabled={status === "generating" || !selectedVoiceId}>
+              {status === "generating" ? "Generating..." : "Generate Speech"}
+            </button>
+          </div>
           <div className="control-grid">
             <Select label="Language" value={language} onChange={setLanguage} options={["English", "Chinese", "Japanese"]} />
             <LabeledSelect
@@ -598,16 +1061,16 @@ function Playground({
             <Select label="Model" value={model} onChange={(value) => setModel(value as ModelId)} options={models.map((item) => item.id)} />
             <Select label="Format" value={format} onChange={(value) => setFormat(value as Generation["format"])} options={["mp3", "wav", "pcm"]} />
           </div>
-          <p className="inline-note">
-            {voicesLoading
-              ? "Loading public voices..."
-              : `${playgroundVoices.length} public voices from id.txt${selectedVoice?.previewText ? ` · ${selectedVoice.previewText}` : ""}`}
-          </p>
-        </section>
-        <section className="panel">
+          <div className="voice-description-card">
+            <strong>{selectedVoice ? `${selectedVoice.name} · ${selectedVoice.style}` : "Voice preview"}</strong>
+            <p>
+              {voicesLoading
+                ? "Loading public voices..."
+                : (selectedVoice?.previewText || "Select a voice to preview its tone and speaking style.")}
+            </p>
+          </div>
           <div className="panel-header">
             <span>Voice settings</span>
-            <span>live request</span>
           </div>
           {["Speed", "Volume", "Pitch", "Stability", "Similarity"].map((item, index) => (
             <div className="slider-row" key={item}>
@@ -616,26 +1079,37 @@ function Playground({
               <b>{["1.0", "1.2", "0", "0.72", "0.82"][index]}</b>
             </div>
           ))}
-          <button className="primary-button full" onClick={generate} disabled={status === "generating" || !selectedVoiceId}>
-            {status === "generating" ? "Generating..." : "Generate"}
-          </button>
         </section>
         <section className="panel result-panel">
           <div className="panel-header">
             <span>Result</span>
-            <span className={`status-pill ${status === "succeeded" ? "ready" : status === "failed" ? "warn" : ""}`}>{status === "succeeded" ? "succeeded" : status === "failed" ? "failed" : "waiting"}</span>
+            <button className="copy-button" onClick={copyCode}>
+              {copied ? "Copied" : "Copy API Request"}
+            </button>
           </div>
-          {audioUrl ? <audio className="native-audio" controls src={audioUrl} /> : <WavePlayer playing={false} onToggle={() => undefined} duration="0:00" large />}
+          {audioUrl ? (
+            <audio className="native-audio" controls src={audioUrl} />
+          ) : status === "generating" ? (
+            <div className="audio-state-panel">
+              <WavePlayer playing onToggle={() => undefined} duration={durationLabel} large />
+              <p>Generating audio preview...</p>
+            </div>
+          ) : (
+            <div className="audio-empty-state">
+              <strong>Click to generate a preview</strong>
+              <p>Generate speech to hear the result instantly.</p>
+            </div>
+          )}
           {error && <p className="inline-note error-note">{error}</p>}
           <div className="meta-list">
             <span>
-              request_id <b>{generations[0]?.requestId ?? "pending"}</b>
+              request_id <b>{generations[0]?.requestId ?? "—"}</b>
             </span>
             <span>
               characters <b>{text.length}</b>
             </span>
             <span>
-              voice <b>{selectedVoice ? selectedVoice.name : selectedVoiceId || "pending"}</b>
+              voice <b>{selectedVoice ? selectedVoice.name : selectedVoiceId || "—"}</b>
             </span>
             <span>
               model <b>{model}</b>
@@ -644,16 +1118,8 @@ function Playground({
               duration <b>{durationLabel}</b>
             </span>
             <span>
-              cost <b>{creditCost === null ? "pending" : `${creditCost.toFixed(3)} credits`}</b>
+              cost <b>{creditCost === null ? "—" : `${creditCost.toFixed(3)} credits`}</b>
             </span>
-          </div>
-        </section>
-        <section className="panel code-panel">
-          <div className="panel-header">
-            <span>Equivalent API request</span>
-            <button className="copy-button" onClick={copyCode}>
-              {copied ? "Copied" : "Copy"}
-            </button>
           </div>
           <pre>
             <code>{apiRequest}</code>
@@ -715,7 +1181,7 @@ function LabeledSelect({
 function Models() {
   return (
     <section className="workspace">
-      <PageTitle eyebrow="Models" title="Two model series, stable versioning." text="用 VoxLite 和 VoxPrime 表达体验定位，用 v1、preview、snapshot 管理升级。" />
+      <PageTitle eyebrow="Models" title="Two model series for distinct voice workloads." text="Use Auralith One for fast, efficient generation and Auralith Ultra for higher expressiveness, stronger emotional detail, and premium voice quality." />
       <div className="model-comparison">
         {models.map((model) => (
           <article key={model.id} className={`panel model-detail ${model.tier === "prime" ? "accent" : ""}`}>
@@ -751,8 +1217,8 @@ function Models() {
           <thead>
             <tr>
               <th>Capability</th>
-              <th>VoxLite</th>
-              <th>VoxPrime</th>
+              <th>Auralith One</th>
+              <th>Auralith Ultra</th>
             </tr>
           </thead>
           <tbody>
@@ -775,7 +1241,9 @@ function Voices({
   onDeleteVoice,
   onRefreshVoices,
   voicesLoading,
-  voicesError
+  voicesError,
+  focusedVoiceId,
+  onFocusHandled
 }: {
   voices: Voice[];
   onToggleFavorite: (voiceId: string) => void;
@@ -784,6 +1252,8 @@ function Voices({
   onRefreshVoices: () => Promise<void>;
   voicesLoading: boolean;
   voicesError: string | null;
+  focusedVoiceId: string | null;
+  onFocusHandled: () => void;
 }) {
   const [source, setSource] = useState("All");
   const [language, setLanguage] = useState("All");
@@ -793,8 +1263,10 @@ function Voices({
   const [previewingVoiceId, setPreviewingVoiceId] = useState<string | null>(null);
   const [previewError, setPreviewError] = useState<string | null>(null);
   const [deletingVoiceId, setDeletingVoiceId] = useState<string | null>(null);
+  const [reclassifyingVoiceId, setReclassifyingVoiceId] = useState<string | null>(null);
   const [confirmDeleteVoice, setConfirmDeleteVoice] = useState<Voice | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const voiceRefs = useRef<Record<string, HTMLElement | null>>({});
 
   const filteredVoices = voices.filter((voice) => {
     const matchesSource = source === "All" || voice.source === source.toLowerCase();
@@ -808,6 +1280,14 @@ function Voices({
     audioRef.current = null;
   }, []);
 
+  useEffect(() => {
+    if (!focusedVoiceId) return;
+    const target = voiceRefs.current[focusedVoiceId];
+    if (!target) return;
+    target.scrollIntoView({ behavior: "smooth", block: "center" });
+    onFocusHandled();
+  }, [focusedVoiceId, onFocusHandled, filteredVoices.length]);
+
   async function playPreview(voice: Voice) {
     if (playingVoiceId === voice.id) {
       audioRef.current?.pause();
@@ -819,9 +1299,9 @@ function Voices({
     setPreviewingVoiceId(voice.id);
     try {
       const result = await synthesizeSpeech({
-        text: voice.previewText || "Preview this voice in the VoxAI Playground.",
+        text: voice.previewText || "Preview this voice in the Auralith Playground.",
         voiceId: voice.id,
-        model: voice.availableModels[0] || "vox-prime-v1"
+        model: voice.availableModels[0] || "auralith-ultra-1.0"
       });
       const nextAudio = new Audio(toDataUrl(result.audioBase64, result.audioMimeType));
       nextAudio.onended = () => setPlayingVoiceId(null);
@@ -852,6 +1332,35 @@ function Voices({
     }
   }
 
+  async function handleReclassifyVoice(voiceId: string, source: "cloned" | "designed") {
+    setReclassifyingVoiceId(voiceId);
+    setPreviewError(null);
+    try {
+      const payload = await updateVoiceSource(voiceId, source);
+      const currentVoice = voices.find((voice) => voice.id === voiceId);
+      rememberVoiceOverride(voiceId, { source, name: currentVoice?.name, ownedByUser: true });
+      if (payload.voice) {
+        setSelectedVoice(payload.voice);
+      }
+      await onRefreshVoices();
+    } catch (error) {
+      setPreviewError(error instanceof Error ? error.message : "Update source failed");
+    } finally {
+      setReclassifyingVoiceId(null);
+    }
+  }
+
+  function handleUpdateAvatarTone(voiceId: string, avatarTone: Voice["avatarTone"]) {
+    const currentVoice = voices.find((voice) => voice.id === voiceId);
+    rememberVoiceOverride(voiceId, {
+      source: currentVoice?.source,
+      name: currentVoice?.name,
+      ownedByUser: currentVoice?.ownedByUser,
+      avatarTone
+    });
+    setSelectedVoice((current) => (current && current.id === voiceId ? { ...current, avatarTone } : current));
+  }
+
   const groupedVoices = [
     {
       key: "system",
@@ -863,19 +1372,19 @@ function Voices({
       key: "cloned",
       title: "My Cloned Voices",
       description: "Voices created from uploaded reference samples.",
-      voices: filteredVoices.filter((voice) => voice.source === "cloned")
+      voices: filteredVoices.filter((voice) => voice.source === "cloned" && voice.ownedByUser)
     },
     {
       key: "designed",
       title: "My Designed Voices",
       description: "Voices generated from prompt design and then saved as reusable IDs.",
-      voices: filteredVoices.filter((voice) => voice.source === "designed")
+      voices: filteredVoices.filter((voice) => voice.source === "designed" && voice.ownedByUser)
     }
   ];
 
   return (
     <section className="workspace">
-      <PageTitle eyebrow="Voices" title="Voice Library" text="搜索、试听、收藏和复制 voice_id。系统声音、克隆声音、设计声音统一管理。" />
+      <PageTitle eyebrow="Voices" title="Voice Library" text="Search, preview, favorite, and copy voice IDs across public, cloned, and prompt-designed voices." />
       {(voicesError || previewError) && <p className="inline-note error-note">{voicesError || previewError}</p>}
       <div className="voice-layout">
         <aside className="filter-panel panel">
@@ -908,6 +1417,10 @@ function Voices({
                       playing={playingVoiceId === voice.id}
                       previewing={previewingVoiceId === voice.id}
                       deleting={deletingVoiceId === voice.id}
+                      focused={focusedVoiceId === voice.id}
+                      onMountRef={(element) => {
+                        voiceRefs.current[voice.id] = element;
+                      }}
                       onPlay={() => playPreview(voice)}
                       onOpenDetails={() => setSelectedVoice(voice)}
                       onUse={() => onUseVoice(voice.id)}
@@ -926,6 +1439,9 @@ function Voices({
           voice={selectedVoice}
           onClose={() => setSelectedVoice(null)}
           onDelete={selectedVoice.source !== "system" ? () => setConfirmDeleteVoice(selectedVoice) : undefined}
+          reclassifying={reclassifyingVoiceId === selectedVoice.id}
+          onReclassify={selectedVoice.source !== "system" ? (source) => handleReclassifyVoice(selectedVoice.id, source) : undefined}
+          onUpdateAvatarTone={(tone) => handleUpdateAvatarTone(selectedVoice.id, tone)}
           onRefresh={async () => {
             const payload = await fetchVoiceStatus(selectedVoice.id);
             if (payload.voice) {
@@ -958,6 +1474,8 @@ function VoiceCard({
   playing,
   previewing,
   deleting,
+  focused,
+  onMountRef,
   onPlay,
   onOpenDetails,
   onUse,
@@ -968,6 +1486,8 @@ function VoiceCard({
   playing: boolean;
   previewing: boolean;
   deleting: boolean;
+  focused: boolean;
+  onMountRef: (element: HTMLElement | null) => void;
   onPlay: () => void;
   onOpenDetails: () => void;
   onUse: () => void;
@@ -983,31 +1503,72 @@ function VoiceCard({
   }
 
   return (
-    <article className="voice-card">
-      <button className="icon-button play-toggle" onClick={onPlay} aria-label={`Play ${voice.name}`}>
-        {previewing ? "…" : playing ? "■" : "▶"}
-      </button>
+    <article className={`voice-card ${focused ? "focused" : ""}`} ref={onMountRef}>
+      <div className="voice-card-top">
+        <div className={`voice-avatar tone-${voice.avatarTone || "emerald"}`}>{getVoiceInitials(voice.name)}</div>
+        <button className="icon-button play-toggle" onClick={onPlay} aria-label={`Play ${voice.name}`}>
+          {previewing ? "…" : playing ? "■" : "▶"}
+        </button>
+      </div>
       <h3>{voice.name}</h3>
-      <p>{voice.language} · {voice.style} · {voice.scenario}</p>
-      <span>{voice.source} · {voice.status || "ACTIVE"}</span>
-      <button onClick={onUse}>Use</button>
-      <button onClick={onOpenDetails}>Details</button>
-      <button onClick={copyVoiceId}>{copied ? "Copied" : "Copy voice_id"}</button>
-      <button onClick={() => onToggleFavorite(voice.id)}>{voice.favorite ? "★ Favorited" : "☆ Favorite"}</button>
+      <p>{voice.previewText || `${voice.language} · ${voice.style} · ${voice.scenario}`}</p>
+      <div className="voice-card-meta">
+        <span>{voice.style}</span>
+        <span>{voice.language}</span>
+      </div>
+      <div className="voice-card-actions">
+        <button onClick={onUse}>Use</button>
+        <button onClick={onOpenDetails}>Details</button>
+      </div>
+      <div className="voice-card-actions">
+        <button onClick={copyVoiceId}>{copied ? "Copied" : "Copy voice_id"}</button>
+        <button onClick={() => onToggleFavorite(voice.id)}>{voice.favorite ? "★ Favorited" : "☆ Favorite"}</button>
+      </div>
       {voice.source !== "system" && <button onClick={onDelete} disabled={deleting}>{deleting ? "Deleting..." : "Delete"}</button>}
       <code>{voice.id}</code>
     </article>
   );
 }
 
-function VoiceDrawer({ voice, onClose, onDelete, onRefresh }: { voice: Voice; onClose: () => void; onDelete?: () => void; onRefresh: () => Promise<void> }) {
+function VoiceDrawer({
+  voice,
+  onClose,
+  onDelete,
+  onRefresh,
+  onReclassify,
+  reclassifying,
+  onUpdateAvatarTone
+}: {
+  voice: Voice;
+  onClose: () => void;
+  onDelete?: () => void;
+  onRefresh: () => Promise<void>;
+  onReclassify?: (source: "cloned" | "designed") => Promise<void>;
+  reclassifying?: boolean;
+  onUpdateAvatarTone: (tone: Voice["avatarTone"]) => void;
+}) {
   return (
     <Drawer title={voice.name} onClose={onClose}>
       <div className="drawer-section">
-        <span className="status-pill ready">{voice.source}</span>
+        <div className={`voice-avatar large tone-${voice.avatarTone || "emerald"}`}>{getVoiceInitials(voice.name)}</div>
         <h3>{voice.id}</h3>
         <p>{voice.language} · {voice.gender} · {voice.style} · {voice.scenario}</p>
         <p>Status: {voice.status || "ACTIVE"}{voice.createdAt ? ` · Created ${voice.createdAt}` : ""}</p>
+      </div>
+      <div className="drawer-section">
+        <h4>Avatar style</h4>
+        <div className="voice-tone-grid">
+          {VOICE_AVATAR_TONES.map((tone) => (
+            <button
+              key={tone}
+              className={`voice-tone-button ${voice.avatarTone === tone ? "active" : ""}`}
+              onClick={() => onUpdateAvatarTone(tone)}
+            >
+              <span className={`voice-avatar mini tone-${tone}`}>{getVoiceInitials(voice.name)}</span>
+              {tone}
+            </button>
+          ))}
+        </div>
       </div>
       <div className="drawer-section">
         <h4>Available models</h4>
@@ -1019,6 +1580,16 @@ function VoiceDrawer({ voice, onClose, onDelete, onRefresh }: { voice: Voice; on
       </div>
       <div className="chip-row">
         <button onClick={() => void onRefresh()}>Refresh status</button>
+        {onReclassify && (
+          <>
+            <button onClick={() => void onReclassify("designed")} disabled={reclassifying || voice.source === "designed"}>
+              {reclassifying && voice.source !== "designed" ? "Updating..." : "Mark as Designed"}
+            </button>
+            <button onClick={() => void onReclassify("cloned")} disabled={reclassifying || voice.source === "cloned"}>
+              {reclassifying && voice.source !== "cloned" ? "Updating..." : "Mark as Cloned"}
+            </button>
+          </>
+        )}
         {onDelete && <button onClick={onDelete}>Delete voice</button>}
       </div>
       <pre><code>{JSON.stringify({ voice_id: voice.id, model: voice.availableModels[0], input: "Preview this voice." }, null, 2)}</code></pre>
@@ -1031,12 +1602,14 @@ function Clone({
   onCreateVoice,
   onLog,
   onDeleteVoice,
-  onRefreshVoices
+  onRefreshVoices,
+  onOpenVoiceLibrary
 }: {
   onCreateVoice: (voice: Voice) => void;
   onLog: (log: ApiLog) => void;
   onDeleteVoice: (voiceId: string) => Promise<void>;
   onRefreshVoices: () => Promise<void>;
+  onOpenVoiceLibrary: (voiceId: string) => void;
 }) {
   const [confirmed, setConfirmed] = useState(false);
   const [status, setStatus] = useState<"idle" | "uploading" | "processing" | "ready" | "failed">("idle");
@@ -1054,25 +1627,29 @@ function Clone({
     setMessage("Uploading sample to MOSI...");
     try {
       const result = await cloneVoice(file, name);
+      rememberVoiceOverride(result.clone.voice_id, { source: "cloned", name, ownedByUser: true });
       setVoiceId(result.clone.voice_id);
       setStatus(result.voice ? "ready" : "processing");
       setMessage(result.voice ? "Voice is active and ready for synthesis." : "Clone job created. MOSI is still processing the voice.");
       onLog({
         time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
         endpoint: "/api/v1/voice/clone",
-        model: "vox-prime-v1",
+        model: "auralith-ultra-1.0",
         status: 200,
         requestId: result.requestId,
         latencyMs: 0
       });
-      if (result.voice) onCreateVoice(result.voice);
+      if (result.voice) {
+        onCreateVoice(result.voice);
+        onOpenVoiceLibrary(result.voice.id);
+      }
     } catch (error) {
       setStatus("failed");
       setMessage(error instanceof Error ? error.message : "Clone request failed");
       onLog({
         time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
         endpoint: "/api/v1/voice/clone",
-        model: "vox-prime-v1",
+        model: "auralith-ultra-1.0",
         status: 500,
         requestId: makeRequestId(),
         latencyMs: 0,
@@ -1082,7 +1659,7 @@ function Clone({
   }
 
   function saveVoice() {
-    if (voiceId) window.location.hash = "#voices";
+    if (voiceId) onOpenVoiceLibrary(voiceId);
   }
 
   async function refreshStatus() {
@@ -1094,6 +1671,7 @@ function Clone({
         onCreateVoice(payload.voice);
         setStatus(payload.voice.status === "ACTIVE" ? "ready" : "processing");
         setMessage(`Current provider status: ${payload.voice.status}.`);
+        if (payload.voice.status === "ACTIVE") onOpenVoiceLibrary(payload.voice.id);
       } else {
         setStatus("failed");
         setMessage("Voice is no longer returned by the provider.");
@@ -1130,7 +1708,7 @@ function Clone({
 
   return (
     <section className="workspace">
-      <PageTitle eyebrow="Voice Clone" title="Create a private voice." text="上传或录制样本，完成质量检测与授权确认后生成可复用 voice_id。" />
+      <PageTitle eyebrow="Voice Clone" title="Create a private voice" text="Upload or record a reference sample, pass the quality and consent checks, and create a reusable voice ID." />
       <Stepper steps={["Upload", "Consent", "Check", "Create", "Save"]} active={activeStep} />
       <div className="step-grid">
         <section className="panel upload-zone">
@@ -1143,7 +1721,7 @@ function Clone({
           <button className="primary-button full" disabled={!confirmed || !file || status === "uploading" || status === "processing"} onClick={startClone}>{status === "uploading" || status === "processing" ? "Cloning..." : "Start clone"}</button>
         </section>
         <section className="panel">
-          <div className="panel-header"><span>2. Quality check</span><span className={`status-pill ${status === "ready" ? "ready" : status === "failed" ? "warn" : ""}`}>{status}</span></div>
+          <div className="panel-header"><span>2. Quality check</span></div>
           <ul className="quality-list">
             <li><span /> Clear speech</li>
             <li><span /> Single speaker</li>
@@ -1186,40 +1764,49 @@ function Design({
   onCreateVoice,
   onLog,
   onDeleteVoice,
-  onRefreshVoices
+  onRefreshVoices,
+  onOpenVoiceLibrary
 }: {
   onCreateVoice: (voice: Voice) => void;
   onLog: (log: ApiLog) => void;
   onDeleteVoice: (voiceId: string) => Promise<void>;
   onRefreshVoices: () => Promise<void>;
+  onOpenVoiceLibrary: (voiceId: string) => void;
 }) {
   const [prompt, setPrompt] = useState("A calm and warm female narrator for multilingual product tutorials.");
-  const [previewText, setPreviewText] = useState("Welcome to VoxAI. This preview is generated from a prompt-designed voice.");
+  const [previewText, setPreviewText] = useState("Welcome to Auralith. This preview is generated from a prompt-designed voice.");
   const [voiceName, setVoiceName] = useState("Prompt Designed Voice");
-  const [active, setActive] = useState(0);
-  const [status, setStatus] = useState<"idle" | "generating" | "previewed" | "saving" | "saved" | "failed">("idle");
+  const [status, setStatus] = useState<"idle" | "generating" | "previewed" | "draft" | "saving" | "saved" | "failed">("idle");
   const [audioBase64, setAudioBase64] = useState("");
   const [audioUrl, setAudioUrl] = useState("");
   const [savedVoiceId, setSavedVoiceId] = useState("");
   const [busyAction, setBusyAction] = useState<"retry" | "refresh" | "delete" | null>(null);
   const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false);
-  const [message, setMessage] = useState("Describe the voice you want, preview it, then save it as a reusable voice_id.");
+  const [cloneSuccessModal, setCloneSuccessModal] = useState<{ name: string; voiceId: string } | null>(null);
+  const [message, setMessage] = useState("Describe the voice you want, preview it, save the draft, then clone it into a reusable voice.");
+
+  const activeStep =
+    status === "generating" ? 1 :
+    status === "previewed" ? 2 :
+    status === "draft" ? 3 :
+    status === "saving" || status === "saved" ? 4 :
+    status === "failed" ? (savedVoiceId ? 4 : audioBase64 ? 3 : 1) :
+    0;
 
   async function regenerate() {
     setStatus("generating");
-    setActive(1);
+    setSavedVoiceId("");
     setMessage("Generating prompt-designed voice preview...");
     try {
       const result = await previewDesignedVoice({ text: previewText, instruction: prompt });
       setAudioBase64(result.audioBase64);
       setAudioUrl(toDataUrl(result.audioBase64, result.audioMimeType));
       setStatus("previewed");
-      setActive(2);
       setMessage(`Preview ready. Cost ${result.usage.credit_cost?.toFixed(3) ?? "0"} credits.`);
       onLog({
         time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
         endpoint: "/api/v1/audio/speech",
-        model: "vox-prime-v1",
+        model: "auralith-ultra-1.0",
         status: 200,
         requestId: result.requestId,
         latencyMs: result.latencyMs
@@ -1230,7 +1817,7 @@ function Design({
       onLog({
         time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
         endpoint: "/api/v1/audio/speech",
-        model: "vox-prime-v1",
+        model: "auralith-ultra-1.0",
         status: 500,
         requestId: makeRequestId(),
         latencyMs: 0,
@@ -1239,21 +1826,29 @@ function Design({
     }
   }
 
-  async function saveCandidate() {
+  function saveDraft() {
+    if (!audioBase64) return;
+    setStatus("draft");
+    setMessage("Draft saved. You can now clone this preview into a reusable voice.");
+  }
+
+  async function cloneDraft() {
     if (!audioBase64) return;
     setStatus("saving");
-    setActive(3);
-    setMessage("Saving preview as a reusable cloned voice...");
+    setMessage("Cloning saved draft into a reusable voice...");
     try {
       const result = await saveDesignedVoice(voiceName, audioBase64);
+      rememberVoiceOverride(result.clone.voice_id, { source: "designed", name: voiceName, ownedByUser: true });
       if (result.voice) onCreateVoice(result.voice);
       setSavedVoiceId(result.voice?.id || result.clone.voice_id);
       setStatus("saved");
-      setMessage(result.voice ? `Voice saved as ${result.voice.id}.` : `Clone job created with voice_id ${result.clone.voice_id}.`);
+      const nextVoiceId = result.voice?.id || result.clone.voice_id;
+      setMessage(`Cloned as ${voiceName} · ${nextVoiceId}.`);
+      setCloneSuccessModal({ name: voiceName, voiceId: nextVoiceId });
       onLog({
         time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
         endpoint: "/api/v1/voice/clone",
-        model: "vox-prime-v1",
+        model: "auralith-ultra-1.0",
         status: 200,
         requestId: result.requestId,
         latencyMs: 0
@@ -1296,8 +1891,8 @@ function Design({
       await deleteVoice(savedVoiceId);
       await onDeleteVoice(savedVoiceId);
       setSavedVoiceId("");
-      setStatus("previewed");
-      setMessage("Saved voice deleted. Preview remains available until you save again.");
+      setStatus("draft");
+      setMessage("Cloned voice deleted. Draft is still available if you want to clone again.");
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Delete failed");
     } finally {
@@ -1307,8 +1902,8 @@ function Design({
 
   return (
     <section className="workspace">
-      <PageTitle eyebrow="Voice Design" title="Design voices from prompts." text="通过文本描述生成试听音频，再固化成可复用 voice_id。" />
-      <Stepper steps={["Prompt", "Generate", "Preview", "Save"]} active={active} />
+      <PageTitle eyebrow="Voice Design" title="Design voices from prompts" text="Generate a preview, save it as a draft, then clone it into a reusable voice ID." />
+      <Stepper steps={["Prompt", "Generate", "Preview", "Save Draft", "Clone Voice"]} active={activeStep} />
       <div className="design-grid">
         <section className="panel">
           <div className="panel-header"><span>Prompt</span><span>guided</span></div>
@@ -1322,21 +1917,30 @@ function Design({
           </div>
           <button className="primary-button full" onClick={regenerate} disabled={status === "generating" || status === "saving"}>{status === "generating" ? "Generating..." : "Generate preview"}</button>
         </section>
-        <section className="candidate-grid">
-          <article className="voice-card candidate">
-            <button className="icon-button play-toggle">{audioUrl ? "♪" : "▶"}</button>
-            <h3>{voiceName}</h3>
-            <p>{status === "previewed" || status === "saved" ? "prompt designed · live preview" : "waiting for preview"}</p>
-            {audioUrl ? <audio className="native-audio" controls src={audioUrl} /> : <p className="inline-note">No preview generated yet.</p>}
-            <p className={`inline-note ${status === "failed" ? "error-note" : ""}`}>{message}</p>
-            {savedVoiceId && <code>{savedVoiceId}</code>}
-            <div className="chip-row">
-              <button onClick={() => void retryPreview()} disabled={busyAction !== null || status === "generating"}>{busyAction === "retry" ? "Retrying..." : "Retry preview"}</button>
-              <button onClick={() => void refreshSavedVoice()} disabled={!savedVoiceId || busyAction !== null}>{busyAction === "refresh" ? "Refreshing..." : "Refresh status"}</button>
-              <button onClick={() => setConfirmDeleteOpen(true)} disabled={!savedVoiceId || busyAction !== null}>{busyAction === "delete" ? "Deleting..." : "Delete voice"}</button>
-            </div>
-            <button onClick={saveCandidate} disabled={!audioBase64 || status === "saving" || status === "saved"}>{status === "saving" ? "Saving..." : status === "saved" ? "Saved" : "Save as Voice"}</button>
-          </article>
+        <section className="panel design-preview-panel">
+          <div className="panel-header"><span>Preview</span></div>
+          <h3>{voiceName}</h3>
+          {audioUrl ? <audio className="native-audio" controls src={audioUrl} /> : <p className="inline-note">No preview generated yet.</p>}
+          <p className={`inline-note ${status === "failed" ? "error-note" : ""}`}>{message}</p>
+          <div className="chip-row">
+            <button onClick={() => void retryPreview()} disabled={busyAction !== null || status === "generating"}>{busyAction === "retry" ? "Retrying..." : "Retry preview"}</button>
+            <button className="secondary-button" onClick={saveDraft} disabled={!audioBase64 || status === "generating" || status === "saving" || status === "saved"}>
+              {status === "draft" || status === "saved" ? "Draft saved" : "Save draft"}
+            </button>
+          </div>
+        </section>
+        <section className="panel design-clone-panel">
+          <div className="panel-header"><span>Clone Voice</span></div>
+          <label>Voice name<input value={voiceName} onChange={(event) => setVoiceName(event.target.value)} /></label>
+          <label>Visibility<select><option>Private</option><option>Team</option></select></label>
+          <code className="block-code">{savedVoiceId || "voice_id will appear after cloning"}</code>
+          <div className="chip-row">
+            <button onClick={() => void refreshSavedVoice()} disabled={!savedVoiceId || busyAction !== null}>{busyAction === "refresh" ? "Refreshing..." : "Refresh status"}</button>
+            <button onClick={() => setConfirmDeleteOpen(true)} disabled={!savedVoiceId || busyAction !== null}>{busyAction === "delete" ? "Deleting..." : "Delete voice"}</button>
+          </div>
+          <button className="primary-button full" onClick={cloneDraft} disabled={status !== "draft"}>
+            {status === "saving" ? "Cloning..." : status === "saved" ? "Cloned" : "Clone as voice"}
+          </button>
         </section>
       </div>
       {confirmDeleteOpen && (
@@ -1350,6 +1954,25 @@ function Design({
             setConfirmDeleteOpen(false);
           }}
         />
+      )}
+      {cloneSuccessModal && (
+        <Modal title="Clone completed" onClose={() => setCloneSuccessModal(null)}>
+          <p className="inline-note">Voice cloned successfully.</p>
+          <code className="block-code">{`${cloneSuccessModal.name} · ${cloneSuccessModal.voiceId}`}</code>
+          <div className="modal-actions">
+            <button className="secondary-button full" onClick={() => setCloneSuccessModal(null)}>Stay here</button>
+            <button
+              className="primary-button full"
+              onClick={() => {
+                const targetId = cloneSuccessModal.voiceId;
+                setCloneSuccessModal(null);
+                onOpenVoiceLibrary(targetId);
+              }}
+            >
+              Open Voice Library
+            </button>
+          </div>
+        </Modal>
       )}
     </section>
   );
@@ -1365,7 +1988,7 @@ function Docs() {
   -d '{
     "model": "moss-tts",
     "voice_id": "2056406571142877184",
-    "text": "Hello from VoxAI."
+    "text": "Hello from Auralith."
   }'`;
   return (
     <section className="workspace docs-layout">
@@ -1384,9 +2007,9 @@ function Docs() {
         <table className="data-table">
           <thead><tr><th>Error code</th><th>Meaning</th><th>Action</th></tr></thead>
           <tbody>
-            <tr><td>4004</td><td>voice_id 不存在或无权限</td><td>检查实时声音库或重新克隆</td></tr>
-            <tr><td>4290</td><td>请求频率超限</td><td>降低并发或稍后重试</td></tr>
-            <tr><td>5000</td><td>服务器内部错误</td><td>记录 request_id 并排查</td></tr>
+            <tr><td>4004</td><td>Voice ID not found or not permitted</td><td>Check the live voice library or clone the voice again</td></tr>
+            <tr><td>4290</td><td>Request rate exceeded</td><td>Reduce concurrency or retry later</td></tr>
+            <tr><td>5000</td><td>Internal server error</td><td>Capture the request ID and investigate</td></tr>
           </tbody>
         </table>
       </article>
@@ -1394,27 +2017,100 @@ function Docs() {
   );
 }
 
-function Usage({ role, generations, logs, onSelectLog }: { role: Role; generations: Generation[]; logs: ApiLog[]; onSelectLog: (log: ApiLog) => void }) {
+function Usage({
+  role,
+  generations,
+  logs,
+  onSelectLog,
+  usagePolicy,
+  onUpdateUsagePolicy,
+  usageSnapshots,
+  voices,
+  voiceGovernance,
+  onUpdateVoiceGovernance
+}: {
+  role: Role;
+  generations: Generation[];
+  logs: ApiLog[];
+  onSelectLog: (log: ApiLog) => void;
+  usagePolicy: UsagePolicy;
+  onUpdateUsagePolicy: (nextPolicy: UsagePolicy) => void;
+  usageSnapshots: UsageSnapshot[];
+  voices: Voice[];
+  voiceGovernance: Record<string, VoiceGovernance>;
+  onUpdateVoiceGovernance: (voiceId: string, patch: Partial<VoiceGovernance>) => void;
+}) {
   const chars = generations.reduce((total, item) => total + item.characters, 0);
-  const overLimit = chars > 120;
   const isAdmin = role === "Admin";
+  const [draftPolicy, setDraftPolicy] = useState(usagePolicy);
+  const [windowSize, setWindowSize] = useState<"6h" | "12h" | "all">("12h");
+  const [usageMetric, setUsageMetric] = useState<"characters" | "requests">("characters");
+  const [voiceSourceFilter, setVoiceSourceFilter] = useState<"All" | "System" | "Cloned" | "Designed">("All");
+  const [governanceQuery, setGovernanceQuery] = useState("");
+  const effectiveQuota = Math.max(usagePolicy.monthlyQuota, 1);
+  const usedPercent = Math.round((chars / effectiveQuota) * 100);
+  const overLimit = usedPercent >= usagePolicy.alertThreshold;
+  const governanceCandidates = voices.filter((voice) => {
+    const sourceMatches = voiceSourceFilter === "All" || voice.source === voiceSourceFilter.toLowerCase();
+    const query = governanceQuery.trim().toLowerCase();
+    const queryMatches = !query || `${voice.name} ${voice.id} ${voice.style}`.toLowerCase().includes(query);
+    return sourceMatches && queryMatches;
+  });
+  const governedVoices = governanceCandidates.slice(0, 6).map((voice) => ({
+    voice,
+    policy: voiceGovernance[voice.id] ?? makeDefaultGovernance(voice)
+  }));
+  const voiceMap = useMemo(() => new Map(voices.map((voice) => [voice.id, voice])), [voices]);
+  const filteredSnapshots = windowSize === "6h" ? usageSnapshots.slice(-3) : windowSize === "12h" ? usageSnapshots.slice(-6) : usageSnapshots;
+  const modelStats = models.map((model) => {
+    const entries = generations.filter((generation) => generation.model === model.id);
+    return {
+      label: model.name,
+      detail: `${entries.length} requests`,
+      value: usageMetric === "characters" ? entries.reduce((sum, generation) => sum + generation.characters, 0) : entries.length
+    };
+  }).sort((left, right) => right.value - left.value);
+  const topVoiceStats = Array.from(
+    generations.reduce((map, generation) => {
+      const voice = voiceMap.get(generation.voiceId);
+      if (voiceSourceFilter !== "All" && voice?.source !== voiceSourceFilter.toLowerCase()) return map;
+      const current = map.get(generation.voiceId) ?? { requests: 0, characters: 0 };
+      map.set(generation.voiceId, {
+        requests: current.requests + 1,
+        characters: current.characters + generation.characters
+      });
+      return map;
+    }, new Map<string, { requests: number; characters: number }>())
+  )
+    .map(([voiceId, stats]) => ({
+      label: voiceMap.get(voiceId)?.name ?? voiceId,
+      detail: `${stats.requests} requests`,
+      value: usageMetric === "characters" ? stats.characters : stats.requests
+    }))
+    .sort((left, right) => right.value - left.value)
+    .slice(0, 5);
+
+  useEffect(() => {
+    setDraftPolicy(usagePolicy);
+  }, [usagePolicy]);
+
   return (
     <section className="workspace">
       <PageTitle
         eyebrow="Usage"
-        title={isAdmin ? "Team usage & API health" : "My usage & API health"}
-        text={isAdmin ? "追踪团队级字符消耗、成功率、延迟、错误码和模型调用占比。" : "追踪当前开发者/API Key 视角的调用量、成功率、延迟和错误状态。"}
+        title={isAdmin ? "Team usage and API health" : "My usage and API health"}
+        text={isAdmin ? "Track team-wide character volume, success rate, latency, error codes, and model mix." : "Track usage, latency, and error states from the current developer or API key perspective."}
       />
       <div className="alert-grid">
         <div className={`alert-card ${overLimit ? "warn" : "ready"}`}>
           <b>{overLimit ? "Quota warning" : "Quota healthy"}</b>
-          <span>{isAdmin ? (overLimit ? "当前团队 mock 用量已接近免费额度，请考虑升级套餐。" : "当前团队用量处于健康范围。") : (overLimit ? "当前 API Key mock 用量接近上限，请联系 Admin 或切换环境。" : "当前 API Key 用量处于健康范围。")}</span>
-          <a href={isAdmin ? "#pricing" : "#docs"}>{isAdmin ? "View plans" : "View limits"}</a>
+          <span>{isAdmin ? (overLimit ? "Team usage is nearing the configured threshold. Review pricing or raise the quota policy." : "Team usage is within the configured threshold.") : (overLimit ? "This API key is nearing its current threshold. Contact an admin or switch environments." : "This API key is operating within the configured threshold.")}</span>
+          <a href={isAdmin ? "#pricing" : "#docs"}>{isAdmin ? "Review plans" : "Review limits"}</a>
         </div>
         <div className="alert-card">
           <b>Error state</b>
-          <span>{isAdmin ? "最近 24 小时团队内有 1 次 rate_limited，可在日志详情中排查。" : "最近 24 小时当前开发者/API Key 有 1 次 rate_limited，可在日志详情中排查。"}</span>
-          <a href="#logs">Open logs</a>
+          <span>{isAdmin ? "One rate-limited request was recorded in the last 24 hours. Review logs for the request context." : "One rate-limited request was recorded for this developer or API key in the last 24 hours."}</span>
+          <a href="#logs">Inspect logs</a>
         </div>
       </div>
       <div className="metric-grid">
@@ -1423,6 +2119,83 @@ function Usage({ role, generations, logs, onSelectLog }: { role: Role; generatio
         <MetricCard label="Avg latency" value="812ms" detail="HTTP TTS" />
         <MetricCard label="Streaming sessions" value={isAdmin ? "4,820" : "318"} detail={isAdmin ? "team this month" : "my this month"} />
       </div>
+      <div className="dashboard-controls panel">
+        <Select label="Window" value={windowSize} onChange={setWindowSize} options={["6h", "12h", "all"]} />
+        <Select label="Metric" value={usageMetric} onChange={setUsageMetric} options={["characters", "requests"]} />
+        <Select label="Voice source" value={voiceSourceFilter} onChange={setVoiceSourceFilter} options={["All", "System", "Cloned", "Designed"]} />
+      </div>
+      <div className="dashboard-grid">
+        <section className="panel chart-panel">
+          <div className="panel-header"><span>Usage timeline</span><span>{windowSize === "all" ? "all points" : `last ${windowSize}`}</span></div>
+          <UsageTimelineChart data={filteredSnapshots} />
+        </section>
+        <section className="panel chart-panel">
+          <div className="panel-header"><span>Model consumption</span><span>{usageMetric}</span></div>
+          <UsageBarList items={modelStats} />
+        </section>
+        <section className="panel chart-panel">
+          <div className="panel-header"><span>Top voices</span><span>{usageMetric}</span></div>
+          <UsageBarList items={topVoiceStats} />
+        </section>
+      </div>
+      {isAdmin && (
+        <div className="team-grid">
+          <section className="panel table-panel">
+            <div className="panel-header"><span>Quota controls</span><span>Internal admin</span></div>
+            <div className="control-grid">
+              <label>
+                Monthly quota
+                <input
+                  type="number"
+                  value={draftPolicy.monthlyQuota}
+                  onChange={(event) => setDraftPolicy((current) => ({ ...current, monthlyQuota: Number(event.target.value) || 0 }))}
+                />
+              </label>
+              <label>
+                Concurrency limit
+                <input
+                  type="number"
+                  value={draftPolicy.concurrencyLimit}
+                  onChange={(event) => setDraftPolicy((current) => ({ ...current, concurrencyLimit: Number(event.target.value) || 0 }))}
+                />
+              </label>
+              <label>
+                Alert threshold %
+                <input
+                  type="number"
+                  value={draftPolicy.alertThreshold}
+                  onChange={(event) => setDraftPolicy((current) => ({ ...current, alertThreshold: Number(event.target.value) || 0 }))}
+                />
+              </label>
+              <label>
+                Overage action
+                <select
+                  value={draftPolicy.overageAction}
+                  onChange={(event) => setDraftPolicy((current) => ({ ...current, overageAction: event.target.value as UsagePolicy["overageAction"] }))}
+                >
+                  <option>Notify</option>
+                  <option>Throttle</option>
+                  <option>Block</option>
+                </select>
+              </label>
+            </div>
+            <div className="modal-actions">
+              <button className="secondary-button full" onClick={() => setDraftPolicy(usagePolicy)}>Reset</button>
+              <button className="primary-button full" onClick={() => onUpdateUsagePolicy(draftPolicy)}>Save policy</button>
+            </div>
+          </section>
+          <section className="panel table-panel">
+            <div className="panel-header"><span>Policy summary</span><span>live</span></div>
+            <ul className="audit-list">
+              <li>Monthly quota <b>{usagePolicy.monthlyQuota.toLocaleString()} chars</b></li>
+              <li>Concurrency limit <b>{usagePolicy.concurrencyLimit}</b></li>
+              <li>Alert threshold <b>{usagePolicy.alertThreshold}%</b></li>
+              <li>Overage action <b>{usagePolicy.overageAction}</b></li>
+            </ul>
+            <p className="inline-note">Current consumption is {usedPercent}% of the configured monthly quota.</p>
+          </section>
+        </div>
+      )}
       <section className="panel table-panel">
         <div className="panel-header"><span>{isAdmin ? "Recent team API logs" : "Recent my API logs"}</span><span>live</span></div>
         <table className="data-table">
@@ -1440,25 +2213,131 @@ function Usage({ role, generations, logs, onSelectLog }: { role: Role; generatio
           </tbody>
         </table>
       </section>
+      {isAdmin && (
+        <section className="panel table-panel section-card">
+          <div className="panel-header"><span>Voice governance</span><span>{governedVoices.length} tracked</span></div>
+          <div className="control-grid compact">
+            <label>
+              Search voices
+              <input value={governanceQuery} onChange={(event) => setGovernanceQuery(event.target.value)} placeholder="voice name or id" />
+            </label>
+            <label>
+              Source scope
+              <select value={voiceSourceFilter} onChange={(event) => setVoiceSourceFilter(event.target.value as "All" | "System" | "Cloned" | "Designed")}>
+                <option>All</option>
+                <option>System</option>
+                <option>Cloned</option>
+                <option>Designed</option>
+              </select>
+            </label>
+          </div>
+          <table className="data-table">
+            <thead><tr><th>Voice</th><th>Source</th><th>Visibility</th><th>Review</th><th>Consent</th></tr></thead>
+            <tbody>
+              {governedVoices.map(({ voice, policy }) => (
+                <tr key={voice.id}>
+                  <td>{voice.name}</td>
+                  <td>{voice.source}</td>
+                  <td>
+                    <select value={policy.visibility} onChange={(event) => onUpdateVoiceGovernance(voice.id, { visibility: event.target.value as VoiceGovernance["visibility"] })}>
+                      <option>Public</option>
+                      <option>Private</option>
+                      <option>Restricted</option>
+                    </select>
+                  </td>
+                  <td>
+                    <select value={policy.reviewStatus} onChange={(event) => onUpdateVoiceGovernance(voice.id, { reviewStatus: event.target.value as VoiceGovernance["reviewStatus"] })}>
+                      <option>Approved</option>
+                      <option>Needs review</option>
+                      <option>Flagged</option>
+                    </select>
+                  </td>
+                  <td>
+                    <select value={policy.consentStatus} onChange={(event) => onUpdateVoiceGovernance(voice.id, { consentStatus: event.target.value as VoiceGovernance["consentStatus"] })}>
+                      <option>Verified</option>
+                      <option>Pending</option>
+                      <option>Missing</option>
+                    </select>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </section>
+      )}
     </section>
   );
 }
 
-function Logs({ role, logs, onSelectLog }: { role: Role; logs: ApiLog[]; onSelectLog: (log: ApiLog) => void }) {
+function Logs({
+  role,
+  logs,
+  onSelectLog,
+  apiKeys,
+  auditEvents,
+  onCreateApiKey,
+  onToggleApiKeyStatus
+}: {
+  role: Role;
+  logs: ApiLog[];
+  onSelectLog: (log: ApiLog) => void;
+  apiKeys: ApiKey[];
+  auditEvents: AuditEvent[];
+  onCreateApiKey: () => void;
+  onToggleApiKeyStatus: (keyId: string) => void;
+}) {
   const isAdmin = role === "Admin";
+  const [query, setQuery] = useState("");
+  const [modelFilter, setModelFilter] = useState<"All" | ModelId>("All");
+  const [statusFilter, setStatusFilter] = useState<"All" | "Success" | "Error">("All");
+  const [severityFilter, setSeverityFilter] = useState<"All" | AuditEvent["severity"]>("All");
+  const [copiedExport, setCopiedExport] = useState(false);
+  const filteredLogs = logs.filter((log) => {
+    const queryMatches = !query.trim() || `${log.requestId} ${log.endpoint} ${log.model} ${log.errorCode ?? ""}`.toLowerCase().includes(query.toLowerCase());
+    const modelMatches = modelFilter === "All" || log.model === modelFilter;
+    const statusMatches = statusFilter === "All" || (statusFilter === "Success" ? log.status < 400 : log.status >= 400);
+    return queryMatches && modelMatches && statusMatches;
+  });
+  const filteredAuditEvents = auditEvents.filter((event) => severityFilter === "All" || event.severity === severityFilter);
+
+  async function copyLogExport() {
+    const csv = [
+      ["time", "endpoint", "model", "latency_ms", "status", "request_id", "error_code"].join(","),
+      ...filteredLogs.map((log) => [log.time, log.endpoint, log.model, log.latencyMs, log.status, log.requestId, log.errorCode ?? ""].map((field) => `"${String(field).replace(/"/g, "\"\"")}"`).join(","))
+    ].join("\n");
+    await copyToClipboard(csv);
+    setCopiedExport(true);
+    window.setTimeout(() => setCopiedExport(false), 1200);
+  }
+
   return (
     <section className="workspace">
       <PageTitle
         eyebrow="Logs"
         title={isAdmin ? "Team request logs" : "My request logs"}
-        text={isAdmin ? "按成员、endpoint、模型、状态码和 request_id 排查团队 API 请求。" : "按当前开发者/API Key 的 endpoint、模型、状态码和 request_id 排查请求。"}
+        text={isAdmin ? "Investigate team API requests by actor, endpoint, model, status code, and request ID." : "Investigate requests from the current developer or API key by endpoint, model, status code, and request ID."}
       />
+      <div className="dashboard-controls panel">
+        <label>
+          Search
+          <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="request ID or endpoint" />
+        </label>
+        <Select label="Model" value={modelFilter} onChange={setModelFilter} options={["All", "auralith-one-1.0", "auralith-ultra-1.0"]} />
+        <Select label="Status" value={statusFilter} onChange={setStatusFilter} options={["All", "Success", "Error"]} />
+        {isAdmin && <Select label="Audit severity" value={severityFilter} onChange={setSeverityFilter} options={["All", "info", "warn", "critical"]} />}
+      </div>
       <section className="panel table-panel">
-        <div className="panel-header"><span>{isAdmin ? "API Logs" : "My API Logs"}</span><span>{logs.length} requests</span></div>
+        <div className="panel-header">
+          <span>{isAdmin ? "API Logs" : "My API Logs"}</span>
+          <div className="pricing-card-actions">
+            <span>{filteredLogs.length} requests</span>
+            <button className="secondary-button small" onClick={() => void copyLogExport()}>{copiedExport ? "Copied CSV" : "Copy CSV"}</button>
+          </div>
+        </div>
         <table className="data-table">
           <thead><tr><th>Time</th><th>Endpoint</th><th>Model</th><th>Latency</th><th>Status</th><th>request_id</th></tr></thead>
           <tbody>
-            {logs.map((log) => (
+            {filteredLogs.map((log) => (
               <tr className="clickable-row" key={log.requestId} onClick={() => onSelectLog(log)}>
                 <td>{log.time}</td><td>{log.endpoint}</td><td>{log.model}</td><td>{log.latencyMs}ms</td>
                 <td><span className={`status-pill ${log.status === 200 ? "ready" : "warn"}`}>{log.status}</span></td><td>{log.requestId}</td>
@@ -1467,34 +2346,138 @@ function Logs({ role, logs, onSelectLog }: { role: Role; logs: ApiLog[]; onSelec
           </tbody>
         </table>
       </section>
+      {isAdmin && (
+        <>
+          <div className="team-grid">
+            <section className="panel table-panel">
+              <div className="panel-header"><span>API keys & scopes</span><button className="secondary-button small" onClick={onCreateApiKey}>Create key</button></div>
+              <table className="data-table">
+                <thead><tr><th>Name</th><th>Scopes</th><th>Status</th><th>Last used</th><th>Action</th></tr></thead>
+                <tbody>
+                  {apiKeys.map((key) => (
+                    <tr key={key.id}>
+                      <td>{key.name}</td>
+                      <td>{key.scopes.join(", ")}</td>
+                      <td><span className={`status-pill ${key.status === "Active" ? "ready" : "warn"}`}>{key.status}</span></td>
+                      <td>{key.lastUsedAt}</td>
+                      <td><button className="secondary-button small" onClick={() => onToggleApiKeyStatus(key.id)}>{key.status === "Active" ? "Disable" : "Enable"}</button></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </section>
+            <section className="panel table-panel">
+              <div className="panel-header"><span>Admin audit trail</span><span>{filteredAuditEvents.length} events</span></div>
+              <table className="data-table">
+                <thead><tr><th>Time</th><th>Actor</th><th>Action</th><th>Resource</th><th>Severity</th></tr></thead>
+                <tbody>
+                  {filteredAuditEvents.map((event) => (
+                    <tr key={event.id}>
+                      <td>{event.time}</td>
+                      <td>{event.actor}</td>
+                      <td>{event.action}</td>
+                      <td>{event.resource}</td>
+                      <td><span className={`status-pill ${event.severity === "info" ? "ready" : "warn"} ${event.severity === "critical" ? "critical" : ""}`}>{event.severity}</span></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </section>
+          </div>
+        </>
+      )}
     </section>
   );
 }
 
-function Team({ apiKeys, onCreateApiKey }: { apiKeys: ApiKey[]; onCreateApiKey: () => void }) {
+function Team({
+  members,
+  apiKeys,
+  auditEvents,
+  onCreateApiKey,
+  onInviteMember,
+  onUpdateMember,
+  onRemoveMember
+}: {
+  members: TeamMember[];
+  apiKeys: ApiKey[];
+  auditEvents: AuditEvent[];
+  onCreateApiKey: () => void;
+  onInviteMember: (email: string, role: TeamMember["role"]) => void;
+  onUpdateMember: (email: string, patch: Partial<TeamMember>) => void;
+  onRemoveMember: (email: string) => void;
+}) {
   const [showInvite, setShowInvite] = useState(false);
+  const [query, setQuery] = useState("");
+  const filteredMembers = members.filter((member) => {
+    const haystack = `${member.name} ${member.email} ${member.role} ${member.status}`.toLowerCase();
+    return !query.trim() || haystack.includes(query.trim().toLowerCase());
+  });
+
   return (
     <section className="workspace">
-      <PageTitle eyebrow="Team" title="Members, roles and audit logs." text="管理团队成员、API 权限、声音资产权限和高风险操作审计。" />
+      <PageTitle eyebrow="Team" title="Members, roles, and audit logs." text="Manage team members, API permissions, voice access, and high-risk operational actions." />
+      <div className="dashboard-controls panel">
+        <label>
+          Search members
+          <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="name, email, or role" />
+        </label>
+        <MetricCard label="Members" value={String(members.length)} detail="active workspace identities" />
+        <MetricCard label="Active keys" value={String(apiKeys.filter((key) => key.status === "Active").length)} detail="usable credentials" />
+      </div>
       <div className="team-grid">
         <section className="panel table-panel">
           <div className="panel-header"><span>Members</span><button className="secondary-button small" onClick={() => setShowInvite(true)}>Invite</button></div>
           <table className="data-table">
+            <thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Status</th><th>Action</th></tr></thead>
             <tbody>
-              {teamMembers.map((member) => (
-                <tr key={member.email}><td>{member.name}</td><td>{member.role}</td><td>{member.status}</td></tr>
+              {filteredMembers.map((member) => (
+                <tr key={member.email}>
+                  <td>{member.name}</td>
+                  <td>{member.email}</td>
+                  <td>
+                    {member.role === "Owner" ? (
+                      member.role
+                    ) : (
+                      <select value={member.role} onChange={(event) => onUpdateMember(member.email, { role: event.target.value as TeamMember["role"] })}>
+                        <option>Admin</option>
+                        <option>Developer</option>
+                        <option>Creator</option>
+                        <option>Viewer</option>
+                      </select>
+                    )}
+                  </td>
+                  <td>
+                    <select value={member.status} onChange={(event) => onUpdateMember(member.email, { status: event.target.value as TeamMember["status"] })}>
+                      <option>Active</option>
+                      <option>Pending</option>
+                    </select>
+                  </td>
+                  <td>
+                    <button className="secondary-button small" onClick={() => onRemoveMember(member.email)} disabled={member.role === "Owner"}>
+                      {member.role === "Owner" ? "Protected" : "Remove"}
+                    </button>
+                  </td>
+                </tr>
               ))}
             </tbody>
           </table>
         </section>
         <section className="panel table-panel">
-          <div className="panel-header"><span>Audit logs</span><span>last 24h</span></div>
-          <ul className="audit-list">
-            <li>Created API key <b>prod-key</b></li>
-            <li>Created voice <b>brand_voice</b></li>
-            <li>Changed role for <b>Creator</b></li>
-            <li>Blocked risky clone request</li>
-          </ul>
+          <div className="panel-header"><span>Recent audit activity</span><span>{auditEvents.length} events</span></div>
+          <table className="data-table">
+            <thead><tr><th>Time</th><th>Actor</th><th>Action</th><th>Resource</th></tr></thead>
+            <tbody>
+              {auditEvents.slice(0, 6).map((event) => (
+                <tr key={event.id}>
+                  <td>{event.time}</td>
+                  <td>{event.actor}</td>
+                  <td>{event.action}</td>
+                  <td>{event.resource}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
         </section>
       </div>
       <section className="panel table-panel section-card">
@@ -1515,7 +2498,15 @@ function Team({ apiKeys, onCreateApiKey }: { apiKeys: ApiKey[]; onCreateApiKey: 
           </tbody>
         </table>
       </section>
-      {showInvite && <InviteModal onClose={() => setShowInvite(false)} />}
+      {showInvite && (
+        <InviteModal
+          onClose={() => setShowInvite(false)}
+          onInvite={(email, nextRole) => {
+            onInviteMember(email, nextRole);
+            setShowInvite(false);
+          }}
+        />
+      )}
     </section>
   );
 }
@@ -1530,48 +2521,347 @@ function MetricCard({ label, value, detail }: { label: string; value: string; de
   );
 }
 
+function UsageTimelineChart({ data }: { data: UsageSnapshot[] }) {
+  const maxChars = Math.max(...data.map((item) => item.characters), 1);
+
+  return (
+    <div className="timeline-chart" aria-label="Usage timeline chart">
+      {data.map((item) => (
+        <div className="timeline-column" key={item.time}>
+          <span className="timeline-value">{Math.round(item.characters / 1000)}k</span>
+          <div className="timeline-bar-wrap">
+            <div className="timeline-bar" style={{ height: `${Math.max(14, (item.characters / maxChars) * 100)}%` }} />
+          </div>
+          <strong>{item.time}</strong>
+          <small>{item.requests} req</small>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function UsageBarList({ items }: { items: { label: string; detail: string; value: number }[] }) {
+  const max = Math.max(...items.map((item) => item.value), 1);
+
+  return (
+    <div className="usage-bar-list">
+      {items.map((item) => (
+        <div className="usage-bar-row" key={item.label}>
+          <div className="usage-bar-meta">
+            <strong>{item.label}</strong>
+            <span>{item.detail}</span>
+          </div>
+          <div className="usage-bar-track">
+            <div className="usage-bar-fill" style={{ width: `${(item.value / max) * 100}%` }} />
+          </div>
+          <b>{item.value.toLocaleString()}</b>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 const docsContent: Record<string, { title: string; text: string }> = {
-  Quickstart: { title: "Generate speech with one MOSI request.", text: "先通过 `/api/v1/voices` 拿到可用 voice_id，再调用 `POST /v1/audio/tts` 返回 base64 WAV 音频。" },
-  Authentication: { title: "Authenticate with API keys.", text: "所有 MOSI 请求使用 Bearer token。当前原型通过本地代理读取 `.env.local`，避免前端泄露密钥。" },
-  "HTTP TTS": { title: "Text to Speech API.", text: "本次集成已打通 `POST https://studio.mosi.cn/v1/audio/tts`，请求体使用 `model: moss-tts`、`text` 和 `voice_id`。" },
-  WebSocket: { title: "Streaming TTS over WebSocket.", text: "当前原型没有接真实 WebSocket，页面仍保留该信息架构，后续需要拿到 MOSI 的实时协议后再实现。" },
-  Voices: { title: "Voice management.", text: "已打通 `GET /api/v1/voices`、`POST /api/v1/files/upload` 和 `POST /api/v1/voice/clone`，支持加载实时声音库与创建新音色。" },
-  Errors: { title: "Structured errors.", text: "MOSI 已知错误码包括 4000、4001、4004、4290、5000。当前前端会把失败信息显示在 Playground、Clone、Design 页面。" },
-  "Rate limits": { title: "Rate limits and quotas.", text: "当前页面没有读取团队级套餐接口，额度和限流仍沿用原型信息展示，真实请求成本会在生成结果中显示 credit_cost。" }
+  Quickstart: { title: "Generate speech with one MOSI request.", text: "Fetch an available voice ID from `/api/v1/voices`, then call `POST /v1/audio/tts` to receive base64-encoded WAV audio." },
+  Authentication: { title: "Authenticate with API keys.", text: "All MOSI requests use a Bearer token. This prototype reads the token from a local proxy via `.env.local` so the browser never receives the secret." },
+  "HTTP TTS": { title: "Text to Speech API.", text: "This prototype integrates `POST https://studio.mosi.cn/v1/audio/tts` using `model: moss-tts`, `text`, and `voice_id`." },
+  WebSocket: { title: "Streaming TTS over WebSocket.", text: "The current prototype keeps the streaming information architecture in place, but does not yet implement the provider's real-time protocol." },
+  Voices: { title: "Voice management.", text: "The app integrates `GET /api/v1/voices`, `POST /api/v1/files/upload`, and `POST /api/v1/voice/clone` to load the live library and create new voices." },
+  Errors: { title: "Structured errors.", text: "Known MOSI error codes include 4000, 4001, 4004, 4290, and 5000. Failed requests surface directly in the Playground, Clone, and Design flows." },
+  "Rate limits": { title: "Rate limits and quotas.", text: "Quota and overage policy are configurable in the Admin workspace and persist through the local admin state, while real generation costs surface as `credit_cost` in the response." }
 };
 
-function Pricing() {
+function Pricing({
+  role,
+  plans,
+  drafts,
+  onUpdatePlan,
+  onPublishChanges,
+  onResetDrafts,
+  onAddDraft,
+  onRemoveDraft,
+  onDuplicateDraft,
+  onMoveDraft
+}: {
+  role: Role;
+  plans: PricingPlan[];
+  drafts: PricingPlan[];
+  onUpdatePlan: (planId: string, patch: Partial<PricingPlan>) => void;
+  onPublishChanges: () => void;
+  onResetDrafts: () => void;
+  onAddDraft: () => void;
+  onRemoveDraft: (planId: string) => void;
+  onDuplicateDraft: (planId: string) => void;
+  onMoveDraft: (planId: string, direction: -1 | 1) => void;
+}) {
+  const isAdmin = role === "Admin";
+  const draftDirty = JSON.stringify(plans) !== JSON.stringify(drafts.map((draft) => ({ ...draft, status: "Published" })));
+  const publishedPlanIds = new Set(plans.map((plan) => plan.id));
+  const draftValidation = drafts.map((plan) => ({ id: plan.id, errors: getPricingValidationErrors(plan) }));
+  const hasDraftErrors = draftValidation.some((item) => item.errors.length > 0);
+  const publishedMap = new Map(plans.map((plan) => [plan.id, plan]));
+
   return (
     <section className="workspace">
-      <PageTitle eyebrow="Pricing" title="Plans for API scale." text="按照模型档位、字符量、并发和企业 SLA 组织套餐。" />
+      <PageTitle
+        eyebrow="Pricing"
+        title="Plans for API scale."
+        text={isAdmin ? "All roles can review plans here, while internal admins can maintain pricing, quotas, plan benefits, and CTA labels." : "Review currently available plans, character quotas, and model access levels."}
+      />
+      <div className="alert-grid">
+        <article className="alert-card ready">
+          <strong>Visible to all roles</strong>
+          <span>`Pricing` is available to Admin, Developer, and Creator roles so plan differences are visible before adoption or upgrade decisions.</span>
+        </article>
+        <article className="alert-card">
+          <strong>{isAdmin ? "Admin edit mode" : "Read-only mode"}</strong>
+          <span>{isAdmin ? (hasDraftErrors ? "Resolve validation issues before publishing pricing changes." : draftDirty ? "Draft changes are staged in the editor and will not affect the published cards until you publish them." : "No unpublished pricing changes are currently staged.") : "Plan details are maintained by internal admins and are not editable from your role."}</span>
+        </article>
+      </div>
       <div className="pricing-grid">
-        {[
-          ["Starter", "$0", "100k chars", "VoxLite", "1 team seat"],
-          ["Growth", "$49", "2M chars", "VoxLite + VoxPrime", "5 team seats"],
-          ["Enterprise", "Custom", "Dedicated quota", "SLA + audit", "Private voices"]
-        ].map(([name, price, quota, model, team]) => (
-          <article className="panel price-card" key={name}>
-            <span className="eyebrow">{name}</span>
-            <h2>{price}</h2>
-            <p>{quota}</p>
-            <ul><li>{model}</li><li>{team}</li><li>Usage analytics</li></ul>
-            <button className={name === "Growth" ? "primary-button full" : "secondary-button full"}>{name === "Enterprise" ? "Contact sales" : "Choose plan"}</button>
+        {plans.map((plan) => (
+          <article className={`panel price-card ${plan.highlighted ? "featured-plan" : ""}`} key={plan.id}>
+            <span className="eyebrow">{plan.name}</span>
+            <h2>{plan.price}</h2>
+            <p>{plan.quota}</p>
+            <ul>
+              <li>{plan.modelAccess}</li>
+              <li>{plan.teamSeats}</li>
+              {plan.features.map((feature) => <li key={feature}>{feature}</li>)}
+            </ul>
+            <button className={plan.highlighted ? "primary-button full" : "secondary-button full"}>{plan.ctaLabel}</button>
           </article>
         ))}
       </div>
+      {isAdmin && (
+        <section className="panel pricing-editor">
+          <div className="panel-header">
+            <span>Pricing editor</span>
+            <span>{draftDirty ? "Draft staged" : "Published state"}</span>
+          </div>
+          <div className="pricing-editor-banner">
+            <span className={`status-pill ${draftDirty ? "warn" : "ready"}`}>{draftDirty ? "Unpublished changes" : "Published"}</span>
+            <p>Published cards remain stable for all users until the draft is published.</p>
+          </div>
+          <div className="pricing-admin-grid">
+            <section className="panel pricing-preview-panel">
+              <div className="panel-header">
+                <span>Published plans</span>
+                <span>{plans.length} live</span>
+              </div>
+              <div className="pricing-mini-list">
+                {plans.map((plan) => (
+                  <article className="pricing-mini-card" key={plan.id}>
+                    <strong>{plan.name}</strong>
+                    <span>{plan.price} · {plan.quota}</span>
+                    <small>{plan.modelAccess}</small>
+                  </article>
+                ))}
+              </div>
+            </section>
+            <section className="panel pricing-preview-panel">
+              <div className="panel-header">
+                <span>Draft preview</span>
+                <button className="secondary-button small" onClick={onAddDraft}>Add plan</button>
+              </div>
+              <div className="pricing-mini-list">
+                {drafts.map((plan) => (
+                  <article className="pricing-mini-card" key={plan.id}>
+                    <strong>{plan.name}</strong>
+                    <span>{plan.price} · {plan.quota}</span>
+                    <small>{publishedPlanIds.has(plan.id) ? "Editing existing published plan" : "New draft plan"}</small>
+                  </article>
+                ))}
+              </div>
+            </section>
+          </div>
+          <div className="pricing-editor-grid">
+            {drafts.map((plan, index) => (
+              <article className="pricing-editor-card" key={plan.id}>
+                <div className="panel-header">
+                  <span>{plan.name}</span>
+                  <div className="pricing-card-actions">
+                    <span>{plan.status || "Draft"}</span>
+                    <button className="ghost-action" onClick={() => onMoveDraft(plan.id, -1)} disabled={index === 0}>Up</button>
+                    <button className="ghost-action" onClick={() => onMoveDraft(plan.id, 1)} disabled={index === drafts.length - 1}>Down</button>
+                    <button className="ghost-action" onClick={() => onDuplicateDraft(plan.id)}>Duplicate</button>
+                    <button className="ghost-action" onClick={() => onRemoveDraft(plan.id)}>Remove</button>
+                  </div>
+                </div>
+                {publishedMap.has(plan.id) && (
+                  <p className="inline-note">Published now: {publishedMap.get(plan.id)?.price} · {publishedMap.get(plan.id)?.quota}</p>
+                )}
+                <div className="control-grid">
+                  <label>
+                    Plan name
+                    <input value={plan.name} onChange={(event) => onUpdatePlan(plan.id, { name: event.target.value })} />
+                  </label>
+                  <label>
+                    Price
+                    <input value={plan.price} onChange={(event) => onUpdatePlan(plan.id, { price: event.target.value })} />
+                  </label>
+                  <label>
+                    Quota
+                    <input value={plan.quota} onChange={(event) => onUpdatePlan(plan.id, { quota: event.target.value })} />
+                  </label>
+                  <label>
+                    Model access
+                    <input value={plan.modelAccess} onChange={(event) => onUpdatePlan(plan.id, { modelAccess: event.target.value })} />
+                  </label>
+                  <label>
+                    Team seats
+                    <input value={plan.teamSeats} onChange={(event) => onUpdatePlan(plan.id, { teamSeats: event.target.value })} />
+                  </label>
+                  <label>
+                    CTA label
+                    <input value={plan.ctaLabel} onChange={(event) => onUpdatePlan(plan.id, { ctaLabel: event.target.value })} />
+                  </label>
+                  <label className="check-row pricing-check">
+                    <input type="checkbox" checked={Boolean(plan.highlighted)} onChange={(event) => onUpdatePlan(plan.id, { highlighted: event.target.checked })} />
+                    Featured recommendation
+                  </label>
+                </div>
+                <label>
+                  Features
+                  <textarea
+                    className="pricing-feature-input"
+                    value={plan.features.join("\n")}
+                    onChange={(event) =>
+                      onUpdatePlan(plan.id, {
+                        features: event.target.value.split("\n").map((item) => item.trim()).filter(Boolean)
+                      })
+                    }
+                  />
+                </label>
+                {draftValidation.find((item) => item.id === plan.id)?.errors.length ? (
+                  <ul className="validation-list">
+                    {draftValidation.find((item) => item.id === plan.id)?.errors.map((error) => <li key={error}>{error}</li>)}
+                  </ul>
+                ) : (
+                  <p className="inline-note">Draft is valid and ready to publish.</p>
+                )}
+              </article>
+            ))}
+          </div>
+          <div className="pricing-publish-row">
+            <p className="inline-note">Publish after editing to update the visible plan cards and record the change in the internal audit trail.</p>
+            <div className="pricing-actions">
+              <button className="secondary-button" onClick={onResetDrafts} disabled={!draftDirty}>Reset draft</button>
+              <button className="primary-button" onClick={onPublishChanges} disabled={!draftDirty || hasDraftErrors}>Publish pricing update</button>
+            </div>
+          </div>
+        </section>
+      )}
     </section>
   );
 }
 
-function Safety() {
+function Safety({
+  voices,
+  apiKeys,
+  usagePolicy,
+  auditEvents,
+  voiceGovernance,
+  onUpdateVoiceGovernance
+}: {
+  voices: Voice[];
+  apiKeys: ApiKey[];
+  usagePolicy: UsagePolicy;
+  auditEvents: AuditEvent[];
+  voiceGovernance: Record<string, VoiceGovernance>;
+  onUpdateVoiceGovernance: (voiceId: string, patch: Partial<VoiceGovernance>) => void;
+}) {
+  const [reviewFilter, setReviewFilter] = useState<"All" | VoiceGovernance["reviewStatus"]>("All");
+  const [consentFilter, setConsentFilter] = useState<"All" | VoiceGovernance["consentStatus"]>("All");
+  const governedVoices = voices.map((voice) => ({
+    voice,
+    policy: voiceGovernance[voice.id] ?? makeDefaultGovernance(voice)
+  }));
+  const filteredVoices = governedVoices.filter(({ policy }) => {
+    const reviewMatches = reviewFilter === "All" || policy.reviewStatus === reviewFilter;
+    const consentMatches = consentFilter === "All" || policy.consentStatus === consentFilter;
+    return reviewMatches && consentMatches;
+  });
+  const flaggedCount = governedVoices.filter(({ policy }) => policy.reviewStatus === "Flagged").length;
+  const pendingConsentCount = governedVoices.filter(({ policy }) => policy.consentStatus !== "Verified").length;
+  const disabledKeys = apiKeys.filter((key) => key.status === "Disabled").length;
+  const criticalEvents = auditEvents.filter((event) => event.severity === "critical");
+
   return (
     <section className="workspace">
-      <PageTitle eyebrow="Safety" title="Voice safety and enterprise control." text="围绕声音授权、滥用防控、API 权限和审计建立企业信任。" />
+      <PageTitle eyebrow="Safety" title="Voice safety and enterprise control." text="Build internal trust with consent checks, misuse controls, API permissions, and operational auditability." />
+      <div className="metric-grid">
+        <MetricCard label="Flagged voices" value={String(flaggedCount)} detail="requires manual review" />
+        <MetricCard label="Consent gaps" value={String(pendingConsentCount)} detail="pending or missing evidence" />
+        <MetricCard label="Disabled keys" value={String(disabledKeys)} detail="credential risk controls" />
+        <MetricCard label="Alert threshold" value={`${usagePolicy.alertThreshold}%`} detail="quota escalation policy" />
+      </div>
+      <div className="dashboard-controls panel">
+        <Select label="Review" value={reviewFilter} onChange={setReviewFilter} options={["All", "Approved", "Needs review", "Flagged"]} />
+        <Select label="Consent" value={consentFilter} onChange={setConsentFilter} options={["All", "Verified", "Pending", "Missing"]} />
+      </div>
+      <div className="team-grid">
+        <section className="panel table-panel">
+          <div className="panel-header"><span>Voice governance queue</span><span>{filteredVoices.length} voices</span></div>
+          <table className="data-table">
+            <thead><tr><th>Voice</th><th>Visibility</th><th>Review</th><th>Consent</th></tr></thead>
+            <tbody>
+              {filteredVoices.slice(0, 8).map(({ voice, policy }) => (
+                <tr key={voice.id}>
+                  <td>
+                    <div className="stack-item">
+                      <span>{voice.name}</span>
+                      <b>{voice.id}</b>
+                    </div>
+                  </td>
+                  <td>
+                    <select value={policy.visibility} onChange={(event) => onUpdateVoiceGovernance(voice.id, { visibility: event.target.value as VoiceGovernance["visibility"] })}>
+                      <option>Public</option>
+                      <option>Private</option>
+                      <option>Restricted</option>
+                    </select>
+                  </td>
+                  <td>
+                    <select value={policy.reviewStatus} onChange={(event) => onUpdateVoiceGovernance(voice.id, { reviewStatus: event.target.value as VoiceGovernance["reviewStatus"] })}>
+                      <option>Approved</option>
+                      <option>Needs review</option>
+                      <option>Flagged</option>
+                    </select>
+                  </td>
+                  <td>
+                    <select value={policy.consentStatus} onChange={(event) => onUpdateVoiceGovernance(voice.id, { consentStatus: event.target.value as VoiceGovernance["consentStatus"] })}>
+                      <option>Verified</option>
+                      <option>Pending</option>
+                      <option>Missing</option>
+                    </select>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </section>
+        <section className="panel table-panel">
+          <div className="panel-header"><span>Critical audit events</span><span>{criticalEvents.length} events</span></div>
+          <table className="data-table">
+            <thead><tr><th>Time</th><th>Actor</th><th>Action</th><th>Resource</th></tr></thead>
+            <tbody>
+              {criticalEvents.slice(0, 6).map((event) => (
+                <tr key={event.id}>
+                  <td>{event.time}</td>
+                  <td>{event.actor}</td>
+                  <td>{event.action}</td>
+                  <td>{event.resource}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </section>
+      </div>
       <div className="feature-grid">
-        <Feature href="#clone" icon="AUTH" title="Consent first" text="克隆前必须确认声音授权，质量检测和风险提示不可跳过。" />
-        <Feature href="#team" icon="RBAC" title="Role-based access" text="API Key、声音资产、账单和日志按团队角色隔离。" />
-        <Feature href="#logs" icon="LOG" title="Audit trail" text="关键操作保留 actor、resource、request_id 和时间。" />
-        <Feature href="#docs" icon="ERR" title="Policy errors" text="违规输入返回结构化错误码，便于产品接入处理。" />
+        <Feature href="#clone" icon="AUTH" title="Consent first" text="Voice cloning remains gated behind explicit consent and a governance review queue you can now manage in-place." />
+        <Feature href="#team" icon="RBAC" title="Role-based access" text="Team members and API keys are now editable from the Admin workspace instead of staying as static placeholders." />
+        <Feature href="#logs" icon="LOG" title="Audit trail" text="Audit events are shared across pricing, key management, team invites, and governance changes." />
+        <Feature href="#usage" icon="ERR" title="Policy controls" text="Quota and overage settings continue to feed admin health alerts alongside governance review status." />
       </div>
     </section>
   );
@@ -1629,12 +2919,30 @@ function ApiKeyModal({ onClose, onCreate }: { onClose: () => void; onCreate: (na
   );
 }
 
-function InviteModal({ onClose }: { onClose: () => void }) {
+function InviteModal({
+  onClose,
+  onInvite
+}: {
+  onClose: () => void;
+  onInvite: (email: string, role: TeamMember["role"]) => void;
+}) {
+  const [email, setEmail] = useState("");
+  const [role, setRole] = useState<TeamMember["role"]>("Developer");
+  const valid = /\S+@\S+\.\S+/.test(email.trim());
+
   return (
     <Modal title="Invite member" onClose={onClose}>
-      <label>Email<input placeholder="teammate@example.com" /></label>
-      <label>Role<select><option>Developer</option><option>Creator</option><option>Viewer</option><option>Admin</option></select></label>
-      <button className="primary-button full" onClick={onClose}>Send invite</button>
+      <label>Email<input value={email} onChange={(event) => setEmail(event.target.value)} placeholder="teammate@example.com" /></label>
+      <label>
+        Role
+        <select value={role} onChange={(event) => setRole(event.target.value as TeamMember["role"])}>
+          <option>Developer</option>
+          <option>Creator</option>
+          <option>Viewer</option>
+          <option>Admin</option>
+        </select>
+      </label>
+      <button className="primary-button full" onClick={() => onInvite(email, role)} disabled={!valid}>Send invite</button>
     </Modal>
   );
 }
@@ -1697,7 +3005,6 @@ function LogDrawer({ log, onClose }: { log: ApiLog; onClose: () => void }) {
 function PageTitle({ eyebrow, title, text }: { eyebrow: string; title: string; text: string }) {
   return (
     <div className="page-title">
-      <span className="eyebrow">{eyebrow}</span>
       <h1>{title}</h1>
       <p>{text}</p>
     </div>

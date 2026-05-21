@@ -59,7 +59,7 @@
 | --- | --- | --- |
 | Home | 快速开始、用量、最近生成、推荐声音 | 控制台首页 |
 | Playground | Text to Speech、Streaming Demo | 网页端试用和调参 |
-| Models | VoxLite、VoxPrime、能力对比、版本说明 | 展示两类参数规模模型 |
+| Models | Auralith One、Auralith Ultra、能力对比、版本说明 | 展示两类参数规模模型 |
 | Voices | 系统声音、自定义声音、克隆声音、设计声音 | 声音资产中心 |
 | Voice Clone | 创建克隆、任务状态、质量检测 | 上传样本创建声音 |
 | Voice Design | 文本描述生成音色、候选试听、保存 | 用自然语言设计新声音 |
@@ -86,21 +86,21 @@
 
 | 模型档位 | 产品命名建议 | 定位 | 适用场景 |
 | --- | --- | --- | --- |
-| 小参数模型 | VoxLite / `vox-lite-v1` | 成本低、速度快、稳定输出 | 客服播报、常规旁白、批量生成、低成本业务 |
-| 大参数模型 | VoxPrime / `vox-prime-v1` | 表现力强、自然度高、情绪和多语言更好 | 内容创作、角色语音、广告、有声书、品牌声音 |
+| 小参数模型 | Auralith One / `auralith-one-1.0` | 成本低、速度快、稳定输出 | 客服播报、常规旁白、批量生成、低成本业务 |
+| 大参数模型 | Auralith Ultra / `auralith-ultra-1.0` | 表现力强、自然度高、情绪和多语言更好 | 内容创作、角色语音、广告、有声书、品牌声音 |
 
 命名原则：
 
-- 对外使用 VoxLite 和 VoxPrime，避免直接使用“小模型”“大模型”等工程术语。
-- API 使用小写短横线格式，例如 `vox-lite-v1`、`vox-prime-v1`。
+- 对外使用 Auralith One 和 Auralith Ultra，避免直接使用“小模型”“大模型”等工程术语。
+- API 使用小写短横线格式，例如 `auralith-one-1.0`、`auralith-ultra-1.0`。
 - 稳定版本使用 `v1`、`v2`；小版本使用 `v1.1`、`v1.2`。
-- 预览版本使用 `preview` 后缀，例如 `vox-prime-v2-preview`。
-- 企业锁版本使用日期快照，例如 `vox-prime-2026-05-18`。
-- `latest` 别名仅用于快速试用，例如 `vox-lite-latest`、`vox-prime-latest`，生产环境建议固定到稳定版本。
+- 预览版本使用 `preview` 后缀，例如 `auralith-ultra-v2-preview`。
+- 企业锁版本使用日期快照，例如 `auralith-ultra-2026-05-18`。
+- `latest` 别名仅用于快速试用，例如 `auralith-one-latest`、`auralith-ultra-latest`，生产环境建议固定到稳定版本。
 
 ### 6.2 模型能力说明
 
-| 能力 | VoxLite / `vox-lite-v1` | VoxPrime / `vox-prime-v1` |
+| 能力 | Auralith One / `auralith-one-1.0` | Auralith Ultra / `auralith-ultra-1.0` |
 | --- | --- | --- |
 | 多语言 TTS | 支持 | 支持 |
 | 低延迟 | 优先支持 | 支持，但成本和延迟更高 |
@@ -112,20 +112,20 @@
 
 ### 6.3 模型选择策略
 
-- Playground 默认推荐 `vox-prime-v1`，突出效果。
-- API 示例默认使用 `vox-lite-v1`，降低开发者试用成本。
-- WebSocket 默认推荐低延迟配置，优先使用 `vox-lite-v1` 或后续专用实时模型。
+- Playground 默认推荐 `auralith-ultra-1.0`，突出效果。
+- API 示例默认使用 `auralith-one-1.0`，降低开发者试用成本。
+- WebSocket 默认推荐低延迟配置，优先使用 `auralith-one-1.0` 或后续专用实时模型。
 - 克隆声音和设计声音应显示可用模型范围。
 
 ### 6.4 版本管理策略
 
 | 类型 | 命名示例 | 使用建议 |
 | --- | --- | --- |
-| 稳定主版本 | `vox-lite-v1`、`vox-prime-v1` | 推荐生产环境使用 |
-| 稳定小版本 | `vox-lite-v1.1`、`vox-prime-v1.2` | 用于兼容升级和灰度 |
-| 预览版本 | `vox-prime-v2-preview` | 用于新能力试用，不保证长期兼容 |
-| 日期快照 | `vox-prime-2026-05-18` | 用于企业客户锁版本和回归 |
-| 最新别名 | `vox-lite-latest`、`vox-prime-latest` | 用于测试和 Playground，不建议生产强依赖 |
+| 稳定主版本 | `auralith-one-1.0`、`auralith-ultra-1.0` | 推荐生产环境使用 |
+| 稳定小版本 | `auralith-one-1.1`、`auralith-ultra-1.2` | 用于兼容升级和灰度 |
+| 预览版本 | `auralith-ultra-v2-preview` | 用于新能力试用，不保证长期兼容 |
+| 日期快照 | `auralith-ultra-2026-05-18` | 用于企业客户锁版本和回归 |
+| 最新别名 | `auralith-one-latest`、`auralith-ultra-latest` | 用于测试和 Playground，不建议生产强依赖 |
 
 升级规则：
 
@@ -309,7 +309,7 @@
 
 ```json
 {
-  "model": "vox-prime-v1",
+  "model": "auralith-ultra-1.0",
   "voice_id": "voice_abc123",
   "language": "en",
   "input": "Welcome to our product demo.",
@@ -339,7 +339,7 @@
   "audio_url": "https://cdn.example.com/audio/gen_456.mp3",
   "duration_ms": 4820,
   "characters_used": 28,
-  "model": "vox-prime-v1",
+  "model": "auralith-ultra-1.0",
   "voice_id": "voice_abc123"
 }
 ```
@@ -375,7 +375,7 @@
 ### 9.2 计费维度
 
 - TTS 字符数或音频时长。
-- 模型档位：VoxLite 低价，VoxPrime 高价。
+- 模型档位：Auralith One 低价，Auralith Ultra 高价。
 - WebSocket 实时生成时长或字符数。
 - 声音克隆次数或克隆声音存储。
 - 音色设计生成次数。
@@ -431,7 +431,7 @@
 - 月活跃 API Key 数。
 - 付费转化率。
 - 字符消耗量。
-- VoxPrime 调用占比。
+- Auralith Ultra 调用占比。
 - 超额用量收入。
 - 企业客户留存率。
 
